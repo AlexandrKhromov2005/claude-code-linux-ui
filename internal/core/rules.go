@@ -1,4 +1,4 @@
-package main
+package core
 
 import (
 	"encoding/json"
@@ -16,9 +16,10 @@ var bashMultiplexers = map[string]bool{
 	"bun": true, "deno": true, "apt": true, "apt-get": true, "brew": true,
 }
 
-// suggestRule proposes an editable allow-rule for a gated tool call, following
-// the smart defaults from §9.3: a command prefix for Bash, a path glob for edits.
-func suggestRule(project *Project, toolName string, input json.RawMessage) string {
+// SuggestRule proposes an editable allow-rule for a gated tool call, following
+// the smart defaults from the spec: a command prefix for Bash, a path glob for
+// edits.
+func SuggestRule(project *Project, toolName string, input json.RawMessage) string {
 	switch toolName {
 	case "Bash":
 		var in struct {

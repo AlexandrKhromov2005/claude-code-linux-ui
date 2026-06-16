@@ -1,4 +1,4 @@
-package main
+package core
 
 import (
 	"encoding/json"
@@ -23,9 +23,8 @@ func TestSuggestRule(t *testing.T) {
 		{"WebFetch", `{"url":"https://x"}`, "WebFetch"},
 	}
 	for _, c := range cases {
-		got := suggestRule(proj, c.tool, json.RawMessage(c.input))
-		if got != c.want {
-			t.Errorf("suggestRule(%s, %s) = %q, want %q", c.tool, c.input, got, c.want)
+		if got := SuggestRule(proj, c.tool, json.RawMessage(c.input)); got != c.want {
+			t.Errorf("SuggestRule(%s, %s) = %q, want %q", c.tool, c.input, got, c.want)
 		}
 	}
 }
@@ -45,8 +44,6 @@ func TestSettingsJSON(t *testing.T) {
 	if len(parsed.Permissions.Allow) != 1 || parsed.Permissions.Deny[0] != "Bash(rm:*)" {
 		t.Fatalf("settings round-trip wrong: %s", got)
 	}
-
-	// A nil project still produces valid empty arrays, not null.
 	empty := settingsJSON(nil)
 	if !strings.Contains(empty, `"allow":[]`) || !strings.Contains(empty, `"deny":[]`) {
 		t.Fatalf("empty settings = %s", empty)
@@ -66,5 +63,30 @@ func TestAddAllowRule(t *testing.T) {
 	}
 	if addAllowRule(p, "  ") {
 		t.Fatal("blank rule should not be added")
+	}
+}
+
+func TestBuildToolPreview(t *testing.T) {
+	bash := BuildToolPreview("Bash", json.RawMessage(`{"command":"ls -la","description":"list"}`))
+	if bash.Kind != PreviewCommand || bash.Command != "ls -la" || bash.Description != "list" {
+		t.Fatalf("bash preview wrong: %+v", bash)
+	}
+	write := BuildToolPreview("Write", json.RawMessage(`{"file_path":"/a","content":"x\ny"}`))
+	if write.Kind != PreviewWrite || write.Path != "/a" || len(write.Diff) != 2 {
+		t.Fatalf("write preview wrong: %+v", write)
+	}
+	if write.Diff[0].Op != DiffAdd {
+		t.Fatalf("write diff op = %q", write.Diff[0].Op)
+	}
+	edit := BuildToolPreview("Edit", json.RawMessage(`{"file_path":"/a","old_string":"a","new_string":"b"}`))
+	if edit.Kind != PreviewEdit || len(edit.Diff) != 2 || edit.Diff[0].Op != DiffDel || edit.Diff[1].Op != DiffAdd {
+		t.Fatalf("edit preview wrong: %+v", edit)
+	}
+	gen := BuildToolPreview("WebFetch", json.RawMessage(`{"url":"https://x"}`))
+	if gen.Kind != PreviewGeneric || !strings.Contains(gen.Raw, "url") {
+		t.Fatalf("generic preview wrong: %+v", gen)
+	}
+	if ToolTarget("Write", json.RawMessage(`{"file_path":"/a/b.go"}`)) != "/a/b.go" {
+		t.Fatalf("tool target wrong")
 	}
 }

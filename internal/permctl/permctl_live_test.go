@@ -1,4 +1,4 @@
-package main
+package permctl
 
 import (
 	"context"
@@ -9,12 +9,13 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/AlexandrKhromov2005/claude-code-linux-ui/internal/core"
 )
 
 // TestLiveClaudeApproval drives the real `claude` binary against the in-process
 // permission server to confirm the MCP transport and allow/deny contract end to
-// end. It is skipped unless CLAUDE_LIVE=1 (it needs an authenticated CLI and
-// network), so normal `go test` stays hermetic.
+// end. Skipped unless CLAUDE_LIVE=1.
 func TestLiveClaudeApproval(t *testing.T) {
 	if os.Getenv("CLAUDE_LIVE") == "" {
 		t.Skip("set CLAUDE_LIVE=1 to run the live claude approval test")
@@ -28,12 +29,12 @@ func TestLiveClaudeApproval(t *testing.T) {
 		dir := t.TempDir()
 
 		var mu sync.Mutex
-		var calls []ApprovalRequest
-		srv := NewPermissionServer(func(req ApprovalRequest) ApprovalDecision {
+		var calls []core.ApprovalRequest
+		srv := New(func(req core.ApprovalRequest) core.ApprovalDecision {
 			mu.Lock()
 			calls = append(calls, req)
 			mu.Unlock()
-			return ApprovalDecision{Allow: allow, Message: "denied by test"}
+			return core.ApprovalDecision{Allow: allow, Message: "denied by test"}
 		})
 		if err := srv.Start(); err != nil {
 			t.Fatalf("start server: %v", err)
@@ -43,14 +44,13 @@ func TestLiveClaudeApproval(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 		defer cancel()
 
-		args := []string{
+		cmd := exec.CommandContext(ctx, bin,
 			"-p", prompt,
 			"--output-format", "stream-json", "--verbose", "--include-partial-messages",
 			"--permission-mode", "default",
-			"--permission-prompt-tool", permPromptTool(),
+			"--permission-prompt-tool", srv.PromptTool(),
 			"--mcp-config", srv.MCPConfigJSON(),
-		}
-		cmd := exec.CommandContext(ctx, bin, args...)
+		)
 		cmd.Dir = dir
 		out, err := cmd.CombinedOutput()
 		if err != nil && ctx.Err() != nil {
@@ -59,28 +59,23 @@ func TestLiveClaudeApproval(t *testing.T) {
 
 		mu.Lock()
 		n := len(calls)
-		var names []string
+		valid := true
 		for _, c := range calls {
-			names = append(names, c.ToolName)
+			if c.ToolName == "" || (len(c.Input) > 0 && !json.Valid(c.Input)) {
+				valid = false
+			}
 		}
 		mu.Unlock()
-		t.Logf("approve called %d time(s): %v", n, names)
 		if n == 0 {
 			t.Fatalf("permission tool was never called\noutput:\n%s", out)
 		}
-		// The approve arguments must carry a tool name and JSON input object.
-		for _, c := range calls {
-			if c.ToolName == "" {
-				t.Errorf("approval missing tool_name")
-			}
-			if len(c.Input) > 0 && !json.Valid(c.Input) {
-				t.Errorf("approval input is not valid JSON: %s", c.Input)
-			}
+		if !valid {
+			t.Fatalf("approval request missing tool_name or had invalid input")
 		}
 
 		_, statErr := os.Stat(filepath.Join(dir, wantFile))
 		if allow && statErr != nil {
-			t.Errorf("allow: expected %s to be written, but: %v", wantFile, statErr)
+			t.Errorf("allow: expected %s, but: %v", wantFile, statErr)
 		}
 		if !allow && statErr == nil {
 			t.Errorf("deny: %s was written despite denial", wantFile)

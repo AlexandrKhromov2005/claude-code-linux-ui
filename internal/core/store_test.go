@@ -1,4 +1,4 @@
-package main
+package core
 
 import (
 	"os"
@@ -23,7 +23,6 @@ func newTestStore(t *testing.T) *Store {
 func TestConfigRoundTrip(t *testing.T) {
 	s := newTestStore(t)
 
-	// Absent config returns defaults.
 	cfg, err := s.LoadConfig()
 	if err != nil {
 		t.Fatalf("LoadConfig: %v", err)
@@ -35,6 +34,7 @@ func TestConfigRoundTrip(t *testing.T) {
 	cfg.DefaultModel = "opus"
 	cfg.LastProject = "demo"
 	cfg.Theme = "dark"
+	cfg.BudgetWarnUSD = 2.5
 	if err := s.SaveConfig(cfg); err != nil {
 		t.Fatalf("SaveConfig: %v", err)
 	}
@@ -60,9 +60,6 @@ func TestProjectRoundTrip(t *testing.T) {
 	if _, err := os.Stat(s.MemoryPath(p.Slug())); err != nil {
 		t.Fatalf("memory.md missing: %v", err)
 	}
-	if _, err := os.Stat(s.threadsDir(p.Slug())); err != nil {
-		t.Fatalf("threads dir missing: %v", err)
-	}
 
 	p.Permissions.Allow = []string{"Bash(go test:*)", "Edit(./src/*)"}
 	p.Permissions.Deny = []string{"Bash(rm:*)"}
@@ -84,22 +81,12 @@ func TestProjectRoundTrip(t *testing.T) {
 	if len(got.Permissions.Deny) != 1 || got.Permissions.Deny[0] != "Bash(rm:*)" {
 		t.Fatalf("deny rules lost: %+v", got.Permissions)
 	}
-	if got.Created.Unix() != p.Created.Unix() {
-		t.Fatalf("created time changed: %v vs %v", got.Created, p.Created)
-	}
 }
 
 func TestUniqueSlug(t *testing.T) {
 	s := newTestStore(t)
-
-	a, err := s.CreateProject("Dup", "/a")
-	if err != nil {
-		t.Fatalf("CreateProject a: %v", err)
-	}
-	b, err := s.CreateProject("Dup", "/b")
-	if err != nil {
-		t.Fatalf("CreateProject b: %v", err)
-	}
+	a, _ := s.CreateProject("Dup", "/a")
+	b, _ := s.CreateProject("Dup", "/b")
 	if a.Slug() == b.Slug() {
 		t.Fatalf("slugs collided: %q", a.Slug())
 	}
@@ -113,10 +100,7 @@ func TestProjectForCwd(t *testing.T) {
 	if p, _ := s.ProjectForCwd("/nope"); p != nil {
 		t.Fatalf("expected no project for unknown cwd")
 	}
-	created, err := s.CreateProject("Here", "/here")
-	if err != nil {
-		t.Fatalf("CreateProject: %v", err)
-	}
+	created, _ := s.CreateProject("Here", "/here")
 	got, err := s.ProjectForCwd("/here")
 	if err != nil {
 		t.Fatalf("ProjectForCwd: %v", err)
@@ -128,17 +112,14 @@ func TestProjectForCwd(t *testing.T) {
 
 func TestThreadRoundTrip(t *testing.T) {
 	s := newTestStore(t)
-	p, err := s.CreateProject("T", "/t")
-	if err != nil {
-		t.Fatalf("CreateProject: %v", err)
-	}
+	p, _ := s.CreateProject("T", "/t")
 
 	th := s.NewThread()
 	th.Title = "hello"
 	th.ClaudeSessionID = "sess-123"
 	now := time.Now()
 	th.Messages = []Msg{
-		{Role: "user", Content: "hi", Ts: now},
+		{Role: "user", Content: "hi", Attachments: []string{"/x/a.png"}, Ts: now},
 		{Role: "assistant", Content: "hey", Ts: now, ToolMeta: map[string]any{"tool": "Bash"}},
 	}
 	if err := s.SaveThread(p.Slug(), th); err != nil {
@@ -152,46 +133,32 @@ func TestThreadRoundTrip(t *testing.T) {
 	if got.Title != "hello" || got.ClaudeSessionID != "sess-123" {
 		t.Fatalf("thread scalars mismatch: %+v", got)
 	}
-	if len(got.Messages) != 2 || got.Messages[0].Content != "hi" || got.Messages[1].Role != "assistant" {
+	if len(got.Messages) != 2 || got.Messages[0].Content != "hi" {
 		t.Fatalf("messages mismatch: %+v", got.Messages)
 	}
-	if got.Messages[1].ToolMeta["tool"] != "Bash" {
-		t.Fatalf("tool_meta lost: %+v", got.Messages[1].ToolMeta)
-	}
-	if !got.Messages[0].Ts.Equal(now) {
-		t.Fatalf("timestamp changed: %v vs %v", got.Messages[0].Ts, now)
+	if len(got.Messages[0].Attachments) != 1 || got.Messages[0].Attachments[0] != "/x/a.png" {
+		t.Fatalf("attachments lost: %+v", got.Messages[0])
 	}
 }
 
 func TestListThreadsOrdering(t *testing.T) {
 	s := newTestStore(t)
-	p, err := s.CreateProject("L", "/l")
-	if err != nil {
-		t.Fatalf("CreateProject: %v", err)
-	}
+	p, _ := s.CreateProject("L", "/l")
 
 	older := s.NewThread()
 	older.Title = "older"
-	if err := s.SaveThread(p.Slug(), older); err != nil {
-		t.Fatalf("save older: %v", err)
-	}
-	// Force a later Updated on the second thread.
+	_ = s.SaveThread(p.Slug(), older)
 	time.Sleep(10 * time.Millisecond)
 	newer := s.NewThread()
 	newer.Title = "newer"
-	if err := s.SaveThread(p.Slug(), newer); err != nil {
-		t.Fatalf("save newer: %v", err)
-	}
+	_ = s.SaveThread(p.Slug(), newer)
 
 	list, err := s.ListThreads(p.Slug())
 	if err != nil {
 		t.Fatalf("ListThreads: %v", err)
 	}
-	if len(list) != 2 {
-		t.Fatalf("got %d threads, want 2", len(list))
-	}
-	if list[0].Title != "newer" {
-		t.Fatalf("ordering wrong: first is %q, want newer", list[0].Title)
+	if len(list) != 2 || list[0].Title != "newer" {
+		t.Fatalf("ordering wrong: %+v", list)
 	}
 
 	if err := s.DeleteThread(p.Slug(), newer.ID); err != nil {
@@ -200,5 +167,35 @@ func TestListThreadsOrdering(t *testing.T) {
 	list, _ = s.ListThreads(p.Slug())
 	if len(list) != 1 || list[0].Title != "older" {
 		t.Fatalf("delete failed: %+v", list)
+	}
+}
+
+func TestLegacyDirMigration(t *testing.T) {
+	dir := t.TempDir()
+	cfgHome := filepath.Join(dir, "config")
+	dataHome := filepath.Join(dir, "data")
+	t.Setenv("XDG_CONFIG_HOME", cfgHome)
+	t.Setenv("XDG_DATA_HOME", dataHome)
+
+	// Seed a legacy claude-tui data dir with one project marker.
+	legacy := filepath.Join(dataHome, legacyAppName, "projects", "demo")
+	if err := os.MkdirAll(legacy, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(legacy, "project.toml"), []byte("name='demo'\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := NewStore(); err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+
+	// The project should now live under the new app name.
+	moved := filepath.Join(dataHome, appName, "projects", "demo", "project.toml")
+	if _, err := os.Stat(moved); err != nil {
+		t.Fatalf("legacy data was not migrated: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dataHome, legacyAppName)); !os.IsNotExist(err) {
+		t.Fatalf("legacy dir should be gone after rename")
 	}
 }

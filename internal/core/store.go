@@ -1,4 +1,4 @@
-package main
+package core
 
 import (
 	"crypto/rand"
@@ -16,7 +16,10 @@ import (
 	toml "github.com/pelletier/go-toml/v2"
 )
 
-const appName = "claude-tui"
+const appName = "claude-code-linux-ui"
+
+// legacyAppName is the previous on-disk name; data is migrated once on startup.
+const legacyAppName = "claude-tui"
 
 // Config is the global user config (config.toml).
 type Config struct {
@@ -53,10 +56,11 @@ func (p *Project) Slug() string { return p.slug }
 
 // Msg is one persisted turn entry in a thread transcript.
 type Msg struct {
-	Role     string         `json:"role"` // user | assistant | tool | system
-	Content  string         `json:"content"`
-	Ts       time.Time      `json:"ts"`
-	ToolMeta map[string]any `json:"tool_meta,omitempty"`
+	Role        string         `json:"role"` // user | assistant | tool | system
+	Content     string         `json:"content"`
+	Attachments []string       `json:"attachments,omitempty"`
+	Ts          time.Time      `json:"ts"`
+	ToolMeta    map[string]any `json:"tool_meta,omitempty"`
 }
 
 // Thread is one conversation: its transcript plus a link to the Claude session.
@@ -69,7 +73,7 @@ type Thread struct {
 	Messages        []Msg     `json:"messages"`
 }
 
-// Store maps the on-disk layout (§5) to typed reads and writes.
+// Store maps the on-disk layout to typed reads and writes.
 type Store struct {
 	ConfigDir string
 	DataDir   string
@@ -91,12 +95,15 @@ func dataHome() string {
 	return filepath.Join(home, ".local", "share")
 }
 
-// NewStore resolves the XDG paths and ensures the base directories exist.
+// NewStore resolves the XDG paths, migrates the legacy claude-tui directories
+// once, and ensures the base directories exist.
 func NewStore() (*Store, error) {
 	s := &Store{
 		ConfigDir: filepath.Join(configHome(), appName),
 		DataDir:   filepath.Join(dataHome(), appName),
 	}
+	migrateLegacyDir(filepath.Join(dataHome(), legacyAppName), s.DataDir)
+	migrateLegacyDir(filepath.Join(configHome(), legacyAppName), s.ConfigDir)
 	if err := os.MkdirAll(s.ConfigDir, 0o755); err != nil {
 		return nil, err
 	}
@@ -104,6 +111,24 @@ func NewStore() (*Store, error) {
 		return nil, err
 	}
 	return s, nil
+}
+
+// migrateLegacyDir moves an old data/config directory to the new name, but only
+// when the new location does not exist yet, so a real new dir is never clobbered.
+func migrateLegacyDir(oldPath, newPath string) {
+	if oldPath == newPath {
+		return
+	}
+	if _, err := os.Stat(newPath); err == nil {
+		return // new location already in use
+	}
+	if _, err := os.Stat(oldPath); err != nil {
+		return // nothing to migrate
+	}
+	if err := os.MkdirAll(filepath.Dir(newPath), 0o755); err != nil {
+		return
+	}
+	_ = os.Rename(oldPath, newPath)
 }
 
 func (s *Store) projectsDir() string           { return filepath.Join(s.DataDir, "projects") }

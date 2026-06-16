@@ -1,4 +1,4 @@
-package main
+package permctl
 
 import (
 	"bytes"
@@ -7,6 +7,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/AlexandrKhromov2005/claude-code-linux-ui/internal/core"
 )
 
 func rpcCall(t *testing.T, url, body string) map[string]any {
@@ -34,33 +36,30 @@ func TestPermissionToolContract(t *testing.T) {
 		allow bool
 	}{{"allow", true}, {"deny", false}} {
 		t.Run(tc.name, func(t *testing.T) {
-			var got ApprovalRequest
-			p := NewPermissionServer(func(req ApprovalRequest) ApprovalDecision {
+			var got core.ApprovalRequest
+			p := New(func(req core.ApprovalRequest) core.ApprovalDecision {
 				got = req
-				return ApprovalDecision{Allow: tc.allow, Message: "denied for test"}
+				return core.ApprovalDecision{Allow: tc.allow, Message: "denied for test"}
 			})
 			ts := httptest.NewServer(http.HandlerFunc(p.handle))
 			defer ts.Close()
 
-			// initialize echoes the protocol version.
 			init := rpcCall(t, ts.URL, `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}`)
 			res, _ := init["result"].(map[string]any)
 			if res["protocolVersion"] != "2025-06-18" {
 				t.Fatalf("protocolVersion not echoed: %v", res)
 			}
 
-			// tools/list advertises the approve tool.
 			list := rpcCall(t, ts.URL, `{"jsonrpc":"2.0","id":2,"method":"tools/list"}`)
 			lr, _ := list["result"].(map[string]any)
 			tools, _ := lr["tools"].([]any)
 			if len(tools) != 1 {
 				t.Fatalf("expected 1 tool, got %v", tools)
 			}
-			if first, _ := tools[0].(map[string]any); first["name"] != permToolName {
-				t.Fatalf("tool name = %v, want %s", first["name"], permToolName)
+			if first, _ := tools[0].(map[string]any); first["name"] != toolName {
+				t.Fatalf("tool name = %v, want %s", first["name"], toolName)
 			}
 
-			// tools/call routes to the decider and returns the contract payload.
 			call := rpcCall(t, ts.URL, `{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"approve","arguments":{"tool_name":"Write","input":{"file_path":"/x","content":"hi"},"tool_use_id":"tu_1"}}}`)
 			cr, _ := call["result"].(map[string]any)
 			content, _ := cr["content"].([]any)
@@ -83,15 +82,10 @@ func TestPermissionToolContract(t *testing.T) {
 					t.Fatalf("updatedInput not echoed: %v", payload["updatedInput"])
 				}
 			} else {
-				if payload["behavior"] != "deny" {
-					t.Fatalf("behavior = %v, want deny", payload["behavior"])
-				}
-				if payload["message"] != "denied for test" {
-					t.Fatalf("message = %v", payload["message"])
+				if payload["behavior"] != "deny" || payload["message"] != "denied for test" {
+					t.Fatalf("deny payload wrong: %v", payload)
 				}
 			}
-
-			// The decider received the original tool details.
 			if got.ToolName != "Write" || got.ToolUseID != "tu_1" {
 				t.Fatalf("decider request = %+v", got)
 			}
@@ -99,8 +93,8 @@ func TestPermissionToolContract(t *testing.T) {
 	}
 }
 
-func TestPermissionNotificationReturns202(t *testing.T) {
-	p := NewPermissionServer(nil)
+func TestNotificationReturns202(t *testing.T) {
+	p := New(nil)
 	ts := httptest.NewServer(http.HandlerFunc(p.handle))
 	defer ts.Close()
 	resp, err := http.Post(ts.URL, "application/json", strings.NewReader(`{"jsonrpc":"2.0","method":"notifications/initialized"}`))
@@ -113,24 +107,23 @@ func TestPermissionNotificationReturns202(t *testing.T) {
 	}
 }
 
-func TestPermResultJSON(t *testing.T) {
-	allow := permResultJSON(ApprovalDecision{Allow: true}, json.RawMessage(`{"a":1}`))
+func TestResultJSON(t *testing.T) {
+	allow := resultJSON(core.ApprovalDecision{Allow: true}, json.RawMessage(`{"a":1}`))
 	if allow != `{"behavior":"allow","updatedInput":{"a":1}}` {
 		t.Fatalf("allow payload = %s", allow)
 	}
-	// Empty input still yields a valid object.
-	emptyAllow := permResultJSON(ApprovalDecision{Allow: true}, nil)
+	emptyAllow := resultJSON(core.ApprovalDecision{Allow: true}, nil)
 	if emptyAllow != `{"behavior":"allow","updatedInput":{}}` {
 		t.Fatalf("empty allow payload = %s", emptyAllow)
 	}
-	deny := permResultJSON(ApprovalDecision{Allow: false}, nil)
+	deny := resultJSON(core.ApprovalDecision{Allow: false}, nil)
 	if deny != `{"behavior":"deny","message":"Denied by user"}` {
 		t.Fatalf("deny payload = %s", deny)
 	}
 }
 
-func TestMCPConfigJSON(t *testing.T) {
-	p := NewPermissionServer(nil)
+func TestConfigAndPromptTool(t *testing.T) {
+	p := New(nil)
 	if err := p.Start(); err != nil {
 		t.Fatalf("start: %v", err)
 	}
@@ -139,7 +132,10 @@ func TestMCPConfigJSON(t *testing.T) {
 	if !strings.Contains(cfg, `"type":"http"`) || !strings.Contains(cfg, p.Addr()) {
 		t.Fatalf("config missing fields: %s", cfg)
 	}
-	if permPromptTool() != "mcp__permctl__approve" {
-		t.Fatalf("prompt tool = %s", permPromptTool())
+	if p.PromptTool() != "mcp__permctl__approve" {
+		t.Fatalf("prompt tool = %s", p.PromptTool())
+	}
+	if !strings.HasPrefix(p.Addr(), "127.0.0.1:") {
+		t.Fatalf("server must bind loopback, got %s", p.Addr())
 	}
 }

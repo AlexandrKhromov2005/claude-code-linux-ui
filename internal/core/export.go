@@ -1,12 +1,12 @@
-package main
+package core
 
 import (
 	"path/filepath"
 	"strings"
 )
 
-// exportThreadMarkdown writes a thread transcript as a readable Markdown file.
-func exportThreadMarkdown(t *Thread, project *Project, path string) error {
+// ExportThreadMarkdown writes a thread transcript as a readable Markdown file.
+func ExportThreadMarkdown(t *Thread, project *Project, path string) error {
 	var b strings.Builder
 	title := t.Title
 	if title == "" {
@@ -35,9 +35,9 @@ func exportThreadMarkdown(t *Thread, project *Project, path string) error {
 	return writeFileAtomic(path, []byte(b.String()))
 }
 
-// defaultExportPath places the export in the project directory, named after the
+// DefaultExportPath places the export in the project directory, named after the
 // thread.
-func defaultExportPath(project *Project, t *Thread) string {
+func DefaultExportPath(project *Project, t *Thread) string {
 	name := slugify(t.Title)
 	if name == "project" {
 		name = t.ID

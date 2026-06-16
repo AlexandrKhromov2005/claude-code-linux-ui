@@ -1,4 +1,4 @@
-package main
+package core
 
 import (
 	"bufio"
@@ -15,7 +15,7 @@ type Mode int
 
 const (
 	ModeChat  Mode = iota // read-only: Read, Grep, Glob; everything else denied
-	ModeAgent             // full toolset, gated through the approval modal
+	ModeAgent             // full toolset, gated through the approval broker
 )
 
 func (m Mode) String() string {
@@ -25,7 +25,8 @@ func (m Mode) String() string {
 	return "chat"
 }
 
-func parseMode(s string) Mode {
+// ParseMode maps a string to a Mode, defaulting to chat.
+func ParseMode(s string) Mode {
 	if strings.EqualFold(strings.TrimSpace(s), "agent") {
 		return ModeAgent
 	}
@@ -45,9 +46,11 @@ const (
 	EvResult                      // turn finished successfully
 	EvError                       // something went wrong
 	EvRetry                       // API retry in progress
+	EvNotice                      // an out-of-band notice from the core (e.g. budget)
 )
 
-// Event is the normalized unit the UI consumes.
+// Event is the normalized unit a client consumes. It is deliberately a plain
+// value type, not tied to any UI framework.
 type Event struct {
 	Kind      EventKind
 	Text      string
@@ -69,7 +72,7 @@ type Engine struct {
 	MemoryFile string // --append-system-prompt-file path ("" = none)
 	Mode       Mode
 
-	// Agent-mode wiring (set up by the permission server in M3).
+	// Agent-mode wiring, supplied by the permission service.
 	PermPromptTool string // e.g. mcp__permctl__approve
 	MCPConfig      string // inline JSON for --mcp-config
 	SettingsJSON   string // inline JSON for --settings (allow/deny rules)
@@ -80,29 +83,26 @@ type rawEvent struct {
 	Type    string `json:"type"`
 	Subtype string `json:"subtype"`
 
-	// system/init + result
 	SessionID string  `json:"session_id"`
 	Model     string  `json:"model"`
 	Result    string  `json:"result"`
 	TotalCost float64 `json:"total_cost_usd"`
 	IsError   bool    `json:"is_error"`
 
-	// system/api_retry
 	Attempt int `json:"attempt"`
 
-	// stream_event carries the raw Anthropic streaming event
 	Event json.RawMessage `json:"event"`
 }
 
 // streamInner is the relevant slice of a raw Anthropic stream event.
 type streamInner struct {
-	Type  string `json:"type"` // message_start, content_block_start, content_block_delta, ...
+	Type  string `json:"type"`
 	Delta struct {
-		Type string `json:"type"` // text_delta
+		Type string `json:"type"`
 		Text string `json:"text"`
 	} `json:"delta"`
 	ContentBlock struct {
-		Type string `json:"type"` // tool_use, text
+		Type string `json:"type"`
 		Name string `json:"name"`
 	} `json:"content_block"`
 }
@@ -165,7 +165,7 @@ func (e *Engine) Send(ctx context.Context, prompt, resumeID string) <-chan Event
 			}
 			var re rawEvent
 			if json.Unmarshal([]byte(line), &re) != nil {
-				continue // ignore anything that isn't a JSON event
+				continue
 			}
 
 			switch re.Type {

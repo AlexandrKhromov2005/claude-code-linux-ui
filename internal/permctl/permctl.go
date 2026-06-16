@@ -1,4 +1,7 @@
-package main
+// Package permctl runs the in-process MCP permission server that Claude calls
+// over loopback HTTP. It is transport: it forwards each gated tool call to a
+// decider (the core App) and returns the allow/deny verdict to Claude.
+package permctl
 
 import (
 	"context"
@@ -9,47 +12,23 @@ import (
 	"sync"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
+	"github.com/AlexandrKhromov2005/claude-code-linux-ui/internal/core"
 )
 
 const (
-	permServerName = "permctl"
-	permToolName   = "approve"
+	serverName = "permctl"
+	toolName   = "approve"
 	// mcpProtocolVersion is the fallback when the client does not announce one.
 	mcpProtocolVersion = "2025-06-18"
 )
 
-// permPromptTool is the mcp__<server>__<tool> name passed to --permission-prompt-tool.
-func permPromptTool() string { return "mcp__" + permServerName + "__" + permToolName }
+// Decider resolves an approval request. The core App's HandleApproval satisfies
+// this signature.
+type Decider func(core.ApprovalRequest) core.ApprovalDecision
 
-// ApprovalDecision is the outcome the modal returns for one tool request.
-type ApprovalDecision struct {
-	Allow        bool
-	UpdatedInput json.RawMessage // echoed back to Claude on allow ("" = original input)
-	Message      string          // reason shown to Claude on deny
-}
-
-// ApprovalRequest carries the tool details from the permission tool to the UI
-// and back via Reply.
-type ApprovalRequest struct {
-	ToolUseID string
-	ToolName  string
-	Input     json.RawMessage
-	Reply     chan ApprovalDecision
-}
-
-// approvalReqMsg delivers an ApprovalRequest into the Bubble Tea update loop.
-type approvalReqMsg struct{ req *ApprovalRequest }
-
-// Decider resolves an approval request. The UI variant blocks until the user
-// answers; tests inject a synchronous function.
-type Decider func(ApprovalRequest) ApprovalDecision
-
-// PermissionServer is an in-process MCP server (streamable HTTP, loopback only)
-// exposing a single `approve` tool. Claude is pointed at it through
-// --permission-prompt-tool / --mcp-config, so every gated tool call is routed
-// back to the TUI that owns the modal.
-type PermissionServer struct {
+// Server is an MCP server (streamable HTTP, loopback only) exposing a single
+// `approve` tool. It satisfies core.PermissionService.
+type Server struct {
 	decide Decider
 
 	ln  net.Listener
@@ -57,25 +36,11 @@ type PermissionServer struct {
 	mu  sync.Mutex
 }
 
-// NewPermissionServer creates a server with the given decision function.
-func NewPermissionServer(decide Decider) *PermissionServer {
-	return &PermissionServer{decide: decide}
-}
-
-// SetUIDecider routes approvals through the Bubble Tea program: it injects an
-// approvalReqMsg and blocks the handler goroutine until the model replies.
-func (p *PermissionServer) SetUIDecider(send func(tea.Msg)) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	p.decide = func(req ApprovalRequest) ApprovalDecision {
-		req.Reply = make(chan ApprovalDecision, 1)
-		send(approvalReqMsg{&req})
-		return <-req.Reply
-	}
-}
+// New creates a server with the given decision function.
+func New(decide Decider) *Server { return &Server{decide: decide} }
 
 // Start binds an ephemeral loopback port and serves until Stop.
-func (p *PermissionServer) Start() error {
+func (p *Server) Start() error {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		return err
@@ -89,7 +54,7 @@ func (p *PermissionServer) Start() error {
 }
 
 // Stop shuts the server down.
-func (p *PermissionServer) Stop() {
+func (p *Server) Stop() {
 	if p.srv == nil {
 		return
 	}
@@ -99,18 +64,21 @@ func (p *PermissionServer) Stop() {
 }
 
 // Addr returns the bound address (host:port), empty before Start.
-func (p *PermissionServer) Addr() string {
+func (p *Server) Addr() string {
 	if p.ln == nil {
 		return ""
 	}
 	return p.ln.Addr().String()
 }
 
+// PromptTool returns the mcp__server__tool name for --permission-prompt-tool.
+func (p *Server) PromptTool() string { return "mcp__" + serverName + "__" + toolName }
+
 // MCPConfigJSON returns the inline --mcp-config value pointing at this server.
-func (p *PermissionServer) MCPConfigJSON() string {
+func (p *Server) MCPConfigJSON() string {
 	cfg := map[string]any{
 		"mcpServers": map[string]any{
-			permServerName: map[string]any{
+			serverName: map[string]any{
 				"type": "http",
 				"url":  fmt.Sprintf("http://%s/mcp", p.Addr()),
 			},
@@ -120,12 +88,12 @@ func (p *PermissionServer) MCPConfigJSON() string {
 	return string(b)
 }
 
-func (p *PermissionServer) ask(req ApprovalRequest) ApprovalDecision {
+func (p *Server) ask(req core.ApprovalRequest) core.ApprovalDecision {
 	p.mu.Lock()
 	d := p.decide
 	p.mu.Unlock()
 	if d == nil {
-		return ApprovalDecision{Allow: false, Message: "no approver configured"}
+		return core.ApprovalDecision{Allow: false, Message: "no approver configured"}
 	}
 	return d(req)
 }
@@ -139,9 +107,8 @@ type rpcReq struct {
 	Params  json.RawMessage `json:"params"`
 }
 
-func (p *PermissionServer) handle(w http.ResponseWriter, r *http.Request) {
+func (p *Server) handle(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		// No server-initiated SSE stream is offered.
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
 	}
@@ -162,11 +129,11 @@ func (p *PermissionServer) handle(w http.ResponseWriter, r *http.Request) {
 		if pv == "" {
 			pv = mcpProtocolVersion
 		}
-		w.Header().Set("Mcp-Session-Id", permServerName)
+		w.Header().Set("Mcp-Session-Id", serverName)
 		writeRPCResult(w, req.ID, map[string]any{
 			"protocolVersion": pv,
 			"capabilities":    map[string]any{"tools": map[string]any{}},
-			"serverInfo":      map[string]any{"name": permServerName, "version": "1"},
+			"serverInfo":      map[string]any{"name": serverName, "version": "1"},
 		})
 	case "notifications/initialized", "notifications/cancelled":
 		w.WriteHeader(http.StatusAccepted)
@@ -185,7 +152,7 @@ func (p *PermissionServer) handle(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (p *PermissionServer) handleToolsCall(w http.ResponseWriter, req rpcReq) {
+func (p *Server) handleToolsCall(w http.ResponseWriter, req rpcReq) {
 	var params struct {
 		Name      string          `json:"name"`
 		Arguments json.RawMessage `json:"arguments"`
@@ -199,19 +166,19 @@ func (p *PermissionServer) handleToolsCall(w http.ResponseWriter, req rpcReq) {
 	}
 	_ = json.Unmarshal(params.Arguments, &args)
 
-	decision := p.ask(ApprovalRequest{
+	decision := p.ask(core.ApprovalRequest{
 		ToolUseID: args.ToolUseID,
 		ToolName:  args.ToolName,
 		Input:     args.Input,
 	})
 
 	writeRPCResult(w, req.ID, map[string]any{
-		"content": []any{map[string]any{"type": "text", "text": permResultJSON(decision, args.Input)}},
+		"content": []any{map[string]any{"type": "text", "text": resultJSON(decision, args.Input)}},
 	})
 }
 
-// permResultJSON renders the allow/deny payload Claude expects as tool output.
-func permResultJSON(d ApprovalDecision, input json.RawMessage) string {
+// resultJSON renders the allow/deny payload Claude expects as tool output.
+func resultJSON(d core.ApprovalDecision, input json.RawMessage) string {
 	if d.Allow {
 		ui := d.UpdatedInput
 		if len(ui) == 0 {
@@ -236,7 +203,7 @@ func permResultJSON(d ApprovalDecision, input json.RawMessage) string {
 
 func approveToolDef() map[string]any {
 	return map[string]any{
-		"name":        permToolName,
+		"name":        toolName,
 		"description": "Approve or deny a tool invocation requested by Claude.",
 		"inputSchema": map[string]any{
 			"type": "object",

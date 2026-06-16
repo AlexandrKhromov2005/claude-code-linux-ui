@@ -1,9 +1,13 @@
-# claude-tui
+# claude-code-linux-ui
 
 A terminal client for Claude on Linux: a chat/agent hybrid built on top of the
 Claude Code CLI in headless mode (`claude -p`). Conversations are grouped into
 projects that share a working directory and context; in agent mode every file
 edit and shell command passes through an approval modal before it runs.
+
+The code is split into a UI-agnostic core (`internal/core`) and thin clients:
+the terminal UI (`internal/tui`) builds on it, and a local web client is planned
+on the same core.
 
 ## Features
 
@@ -31,11 +35,11 @@ edit and shell command passes through an approval modal before it runs.
 
 ## Build
 
-    go build -o claude-tui .
+    go build -o claude-code-linux-ui ./cmd/claude-code-linux-ui
 
 ## Run
 
-    ./claude-tui
+    ./claude-code-linux-ui
 
 On first start in a directory that is not yet a project, the project switcher
 offers to use the current folder. Existing projects are reachable with `Ctrl+P`.
@@ -73,10 +77,14 @@ In the approval modal: `a` allow, `r` remember+allow, `d` deny.
 
 ## Configuration and data
 
-- Config: `$XDG_CONFIG_HOME/claude-tui/config.toml` (defaults to
-  `~/.config/claude-tui/`).
-- Data: `$XDG_DATA_HOME/claude-tui/` (defaults to `~/.local/share/claude-tui/`),
-  laid out as `projects/<slug>/{project.toml, memory.md, threads/<id>.json}`.
+- Config: `$XDG_CONFIG_HOME/claude-code-linux-ui/config.toml` (defaults to
+  `~/.config/claude-code-linux-ui/`).
+- Data: `$XDG_DATA_HOME/claude-code-linux-ui/` (defaults to
+  `~/.local/share/claude-code-linux-ui/`), laid out as
+  `projects/<slug>/{project.toml, memory.md, threads/<id>.json}`.
+
+Data from the previous `claude-tui` directories is migrated automatically on
+first run when the new location does not exist yet.
 
 `config.toml` keys: `claude_bin`, `default_model`, `default_mode`, `theme`,
 `last_project`, `budget_warn_usd`. Environment overrides: `CLAUDE_BIN`,

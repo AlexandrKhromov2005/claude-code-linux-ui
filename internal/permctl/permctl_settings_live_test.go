@@ -1,4 +1,4 @@
-package main
+package permctl
 
 import (
 	"context"
@@ -8,11 +8,13 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/AlexandrKhromov2005/claude-code-linux-ui/internal/core"
 )
 
 // TestLiveClaudeSettingsRules verifies that remembered allow rules pre-approve a
 // tool (the modal is never consulted) and that deny rules win over allow. Gated
-// on CLAUDE_LIVE like the other live test.
+// on CLAUDE_LIVE.
 func TestLiveClaudeSettingsRules(t *testing.T) {
 	if os.Getenv("CLAUDE_LIVE") == "" {
 		t.Skip("set CLAUDE_LIVE=1 to run the live settings-rules test")
@@ -27,11 +29,11 @@ func TestLiveClaudeSettingsRules(t *testing.T) {
 
 		var mu sync.Mutex
 		called := 0
-		srv := NewPermissionServer(func(req ApprovalRequest) ApprovalDecision {
+		srv := New(func(req core.ApprovalRequest) core.ApprovalDecision {
 			mu.Lock()
 			called++
 			mu.Unlock()
-			return ApprovalDecision{Allow: deciderAllow, Message: "test"}
+			return core.ApprovalDecision{Allow: deciderAllow, Message: "test"}
 		})
 		if err := srv.Start(); err != nil {
 			t.Fatalf("start: %v", err)
@@ -44,7 +46,7 @@ func TestLiveClaudeSettingsRules(t *testing.T) {
 			"-p", "Create a file named "+wantFile+" containing the word hi. Use the Write tool.",
 			"--output-format", "stream-json", "--verbose",
 			"--permission-mode", "default",
-			"--permission-prompt-tool", permPromptTool(),
+			"--permission-prompt-tool", srv.PromptTool(),
 			"--mcp-config", srv.MCPConfigJSON(),
 			"--settings", settings,
 		)
@@ -58,7 +60,7 @@ func TestLiveClaudeSettingsRules(t *testing.T) {
 		gotCalled := called
 		mu.Unlock()
 		if wantCalled && gotCalled == 0 {
-			t.Errorf("expected approve to be consulted, but it was not\n%s", out)
+			t.Errorf("expected approve to be consulted\n%s", out)
 		}
 		if !wantCalled && gotCalled != 0 {
 			t.Errorf("approve was consulted %d time(s) but a settings rule should have decided", gotCalled)
@@ -73,13 +75,9 @@ func TestLiveClaudeSettingsRules(t *testing.T) {
 	}
 
 	t.Run("remembered_allow_skips_prompt", func(t *testing.T) {
-		// Allow rule pre-approves Write; the decider would deny, proving it is
-		// never consulted.
 		run(t, `{"permissions":{"allow":["Write"]}}`, false, "allowed.txt", false, true)
 	})
-
 	t.Run("deny_beats_allow", func(t *testing.T) {
-		// Deny wins over allow; the decider would allow, proving it is bypassed.
 		run(t, `{"permissions":{"allow":["Write"],"deny":["Write"]}}`, true, "denied.txt", false, false)
 	})
 }
