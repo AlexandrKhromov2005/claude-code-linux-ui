@@ -13,6 +13,7 @@ import (
 	"github.com/charmbracelet/bubbles/filepicker"
 	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/textarea"
+	"github.com/charmbracelet/bubbles/textinput"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/glamour"
@@ -40,6 +41,7 @@ const (
 	overlayPicker
 	overlayProjects
 	overlayThreads
+	overlayApprove
 )
 
 // tea.Msg types
@@ -47,24 +49,28 @@ type eventMsg Event
 type streamClosedMsg struct{}
 type memoryEditedMsg struct{ err error }
 
-const helpText = "Команды: /project [имя] (Ctrl+P), /threads (Ctrl+T), /new, /resume <id>, /memory, " +
-	"/attach <путь> (Ctrl+O), /files [clear], /detach [N], /help, /quit. " +
+const helpText = "Команды: /project [имя] (Ctrl+P), /threads (Ctrl+T), /new, /resume <id>, /mode chat|agent (Tab), " +
+	"/memory, /attach <путь> (Ctrl+O), /files [clear], /detach [N], /help, /quit. " +
+	"В agent-режиме правки и команды проходят через модалку подтверждения. " +
 	"В сообщении можно писать @/путь напрямую. Enter — отправить, Ctrl+J — перенос строки, Esc — отменить ответ."
 
 type model struct {
 	store  *Store
 	config Config
 	engine *Engine
+	perm   *PermissionServer
+	permErr error
 
 	project *Project // active project (nil only at the startup switcher)
 	thread  *Thread  // active thread
 	mode    Mode
 
-	vp   viewport.Model
-	ta   textarea.Model
-	sp   spinner.Model
-	fp   filepicker.Model
-	glam *glamour.TermRenderer
+	vp        viewport.Model
+	ta        textarea.Model
+	sp        spinner.Model
+	fp        filepicker.Model
+	ruleInput textinput.Model
+	glam      *glamour.TermRenderer
 
 	messages    []message
 	attachments []string
@@ -75,6 +81,9 @@ type model struct {
 	overlay       overlayKind
 	status        string
 	pendingHint   string
+
+	pending     *ApprovalRequest // tool call awaiting an approve/deny answer
+	remembering bool             // editing the allow-rule before allowing
 
 	projList selList
 	thrList  selList
@@ -133,14 +142,27 @@ func newModel() (model, error) {
 	fp.FileAllowed = true
 	fp.AutoHeight = false
 
+	ri := textinput.New()
+	ri.Prompt = "правило: "
+	ri.CharLimit = 256
+
+	// The approval server is in-process so gated tool calls surface in this
+	// same UI. It binds a loopback port now; the decider is attached in main
+	// once the Bubble Tea program exists.
+	perm := NewPermissionServer(nil)
+	permErr := perm.Start()
+
 	m := model{
-		store:  store,
-		config: cfg,
-		engine: &Engine{BinPath: bin, Model: mdl, Mode: ModeChat},
-		mode:   parseMode(cfg.DefaultMode),
-		ta:     ta,
-		sp:     sp,
-		fp:     fp,
+		store:     store,
+		config:    cfg,
+		engine:    &Engine{BinPath: bin, Model: mdl, Mode: ModeChat},
+		perm:      perm,
+		permErr:   permErr,
+		mode:      parseMode(cfg.DefaultMode),
+		ta:        ta,
+		sp:        sp,
+		fp:        fp,
+		ruleInput: ri,
 	}
 
 	cwd, _ := os.Getwd()
@@ -178,6 +200,41 @@ func (m *model) configureEngine() {
 	} else {
 		m.engine.Model = m.config.DefaultModel
 	}
+
+	// Agent-mode wiring: remembered allow/deny rules plus the approval server.
+	m.engine.PermPromptTool = ""
+	m.engine.MCPConfig = ""
+	m.engine.SettingsJSON = ""
+	if m.mode == ModeAgent {
+		m.engine.SettingsJSON = settingsJSON(m.project)
+		if m.perm != nil && m.perm.Addr() != "" {
+			m.engine.PermPromptTool = permPromptTool()
+			m.engine.MCPConfig = m.perm.MCPConfigJSON()
+		}
+	}
+}
+
+// setMode switches chat/agent, persists it on the project, and rewires the
+// engine. It warns when agent mode lacks a working approval server.
+func (m *model) setMode(mode Mode) {
+	m.mode = mode
+	if m.project != nil {
+		m.project.Mode = mode.String()
+		_ = m.store.SaveProject(m.project)
+	}
+	m.configureEngine()
+	if mode == ModeAgent && (m.perm == nil || m.perm.Addr() == "") {
+		m.commitSystem("⚠ approval-сервер недоступен: мутации будут отклонены. " + errString(m.permErr))
+	} else {
+		m.commitSystem("режим: " + mode.String())
+	}
+}
+
+func errString(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
 }
 
 func (m *model) openProject(p *Project) {
@@ -497,6 +554,19 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
+	// An approval request preempts whatever overlay is open: Claude is blocked
+	// waiting for the answer.
+	if am, ok := msg.(approvalReqMsg); ok {
+		return m.beginApproval(am.req)
+	}
+
+	// Stream-pump messages must always reach the main handler so the event loop
+	// keeps draining even while an overlay (e.g. the approval modal) is open.
+	switch msg.(type) {
+	case eventMsg, streamClosedMsg, spinner.TickMsg, memoryEditedMsg:
+		return m.updateMain(msg)
+	}
+
 	switch m.overlay {
 	case overlayPicker:
 		return m.updatePicker(msg)
@@ -504,6 +574,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.updateProjects(msg)
 	case overlayThreads:
 		return m.updateThreads(msg)
+	case overlayApprove:
+		return m.updateApprove(msg)
 	}
 	return m.updateMain(msg)
 }
@@ -627,6 +699,97 @@ func (m model) updateThreads(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+func (m model) beginApproval(req *ApprovalRequest) (tea.Model, tea.Cmd) {
+	m.pending = req
+	m.remembering = false
+	m.ruleInput.Blur()
+	m.overlay = overlayApprove
+	return m, nil
+}
+
+func (m model) updateApprove(msg tea.Msg) (tea.Model, tea.Cmd) {
+	k, ok := msg.(tea.KeyMsg)
+	if !ok {
+		return m, nil
+	}
+	if m.remembering {
+		switch k.String() {
+		case "enter":
+			rule := strings.TrimSpace(m.ruleInput.Value())
+			if rule != "" && m.project != nil && addAllowRule(m.project, rule) {
+				_ = m.store.SaveProject(m.project)
+				m.configureEngine() // refresh inline --settings
+			}
+			return m.resolveApproval(true)
+		case "esc":
+			m.remembering = false
+			m.ruleInput.Blur()
+			return m, nil
+		}
+		var cmd tea.Cmd
+		m.ruleInput, cmd = m.ruleInput.Update(msg)
+		return m, cmd
+	}
+	switch k.String() {
+	case "a", "y", "enter":
+		return m.resolveApproval(true)
+	case "d", "n", "esc":
+		return m.resolveApproval(false)
+	case "r":
+		if m.project != nil {
+			m.remembering = true
+			m.ruleInput.SetValue(suggestRule(m.project, m.pending.ToolName, m.pending.Input))
+			m.ruleInput.CursorEnd()
+			m.ruleInput.Focus()
+			return m, textinput.Blink
+		}
+	}
+	return m, nil
+}
+
+func (m model) resolveApproval(allow bool) (tea.Model, tea.Cmd) {
+	req := m.pending
+	if req == nil {
+		m.overlay = overlayNone
+		return m, nil
+	}
+	dec := ApprovalDecision{Allow: allow}
+	if !allow {
+		dec.Message = "Отклонено пользователем"
+	}
+	if req.Reply != nil {
+		req.Reply <- dec
+	}
+	m.commitApproval(req, allow)
+	m.pending = nil
+	m.remembering = false
+	m.ruleInput.Blur()
+	m.overlay = overlayNone
+	m.refreshViewport()
+	return m, nil
+}
+
+// commitApproval records a gated tool decision in the conversation timeline and
+// the persisted transcript.
+func (m *model) commitApproval(req *ApprovalRequest, allow bool) {
+	mark, verdict := "✗", "отклонено"
+	if allow {
+		mark, verdict = "✓", "разрешено"
+	}
+	target := toolTarget(req.ToolName, req.Input)
+	line := strings.TrimSpace(fmt.Sprintf("%s %s %s · %s", mark, req.ToolName, target, verdict))
+	m.messages = append(m.messages, message{role: roleSystem, content: line, rendered: m.renderSystem(line)})
+	if m.project != nil && m.thread != nil {
+		m.thread.Messages = append(m.thread.Messages, Msg{
+			Role:     "tool",
+			Content:  line,
+			Ts:       time.Now(),
+			ToolMeta: map[string]any{"tool": req.ToolName, "allow": allow, "target": target},
+		})
+		_ = m.store.SaveThread(m.project.Slug(), m.thread)
+	}
+}
+
 func (m model) updateMain(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmds []tea.Cmd
 
@@ -652,6 +815,17 @@ func (m model) updateMain(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case "ctrl+t":
 			m.openThreadBrowser()
+			return m, nil
+
+		case "tab", "ctrl+g":
+			if !m.streaming {
+				next := ModeAgent
+				if m.mode == ModeAgent {
+					next = ModeChat
+				}
+				m.setMode(next)
+				m.refreshViewport()
+			}
 			return m, nil
 
 		case "ctrl+j":
@@ -876,6 +1050,23 @@ func (m *model) handleCommand(val string) (bool, tea.Cmd) {
 		m.commitSystem("возобновлён тред: " + t.Title)
 		return true, nil
 
+	case "/mode":
+		switch strings.ToLower(arg) {
+		case "chat":
+			m.setMode(ModeChat)
+		case "agent":
+			m.setMode(ModeAgent)
+		case "":
+			next := ModeAgent
+			if m.mode == ModeAgent {
+				next = ModeChat
+			}
+			m.setMode(next)
+		default:
+			m.commitSystem("использование: /mode chat|agent")
+		}
+		return true, nil
+
 	case "/memory", "/m":
 		return true, m.cmdEditMemory()
 
@@ -1065,6 +1256,8 @@ func (m model) View() string {
 		return lipgloss.JoinVertical(lipgloss.Left, m.headerView(), m.projList.view(m.width, m.overlayHeight()))
 	case overlayThreads:
 		return lipgloss.JoinVertical(lipgloss.Left, m.headerView(), m.thrList.view(m.width, m.overlayHeight()))
+	case overlayApprove:
+		return m.approveView()
 	}
 	return lipgloss.JoinVertical(lipgloss.Left,
 		m.headerView(),
@@ -1073,6 +1266,30 @@ func (m model) View() string {
 		m.inputView(),
 		m.footerView(),
 	)
+}
+
+func (m model) approveView() string {
+	req := m.pending
+	if req == nil {
+		return lipgloss.JoinVertical(lipgloss.Left, m.headerView(), m.vp.View())
+	}
+	preview := clampLines(toolPreview(req.ToolName, req.Input), m.overlayHeight()-7)
+	lines := []string{
+		approveTitleStyle.Render("⚠ Запрос доступа — " + req.ToolName),
+		"",
+		preview,
+		"",
+	}
+	if m.remembering {
+		lines = append(lines,
+			warnStyle.Render("allow-правило (Enter — сохранить и разрешить · Esc — назад):"),
+			ruleInputStyle.Render(m.ruleInput.View()),
+		)
+	} else {
+		lines = append(lines, hintStyle.Render("[a] разрешить · [r] запомнить+разрешить · [d] отклонить"))
+	}
+	box := approveBoxStyle.Width(m.width - 4).Render(strings.Join(lines, "\n"))
+	return lipgloss.JoinVertical(lipgloss.Left, m.headerView(), box)
 }
 
 func (m model) headerView() string {

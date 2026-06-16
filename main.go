@@ -14,8 +14,17 @@ func main() {
 		os.Exit(1)
 	}
 	p := tea.NewProgram(m, tea.WithAltScreen())
-	if _, err := p.Run(); err != nil {
-		fmt.Fprintln(os.Stderr, "ошибка:", err)
+	// Route gated tool approvals through the running program so the modal shows
+	// in this UI.
+	if m.perm != nil {
+		m.perm.SetUIDecider(p.Send)
+	}
+	_, runErr := p.Run()
+	if m.perm != nil {
+		m.perm.Stop()
+	}
+	if runErr != nil {
+		fmt.Fprintln(os.Stderr, "ошибка:", runErr)
 		os.Exit(1)
 	}
 }
