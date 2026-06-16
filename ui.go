@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -47,7 +48,7 @@ type streamClosedMsg struct{}
 type memoryEditedMsg struct{ err error }
 
 const helpText = "Команды: /project [имя] (Ctrl+P), /threads (Ctrl+T), /new, /resume <id>, /memory, " +
-	"/attach <путь> (Ctrl+O), /files, /help, /quit. " +
+	"/attach <путь> (Ctrl+O), /files [clear], /detach [N], /help, /quit. " +
 	"В сообщении можно писать @/путь напрямую. Enter — отправить, Ctrl+J — перенос строки, Esc — отменить ответ."
 
 type model struct {
@@ -338,6 +339,23 @@ func (m *model) openThreadBrowser() {
 	m.ta.Blur()
 }
 
+// openPicker shows the file picker rooted at the project directory.
+func (m *model) openPicker() tea.Cmd {
+	dir := ""
+	if m.project != nil {
+		dir = m.project.Cwd
+	}
+	if dir == "" {
+		if home, err := os.UserHomeDir(); err == nil {
+			dir = home
+		}
+	}
+	m.fp.CurrentDirectory = dir
+	m.overlay = overlayPicker
+	m.ta.Blur()
+	return m.fp.Init()
+}
+
 func (m model) useCurrentFolder() (tea.Model, tea.Cmd) {
 	cwd, err := os.Getwd()
 	if err != nil {
@@ -491,18 +509,23 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m model) updatePicker(msg tea.Msg) (tea.Model, tea.Cmd) {
+	if k, isKey := msg.(tea.KeyMsg); isKey {
+		switch k.String() {
+		case "esc":
+			m.overlay = overlayNone
+			m.ta.Focus()
+			return m, textarea.Blink
+		case "ctrl+h":
+			m.fp.ShowHidden = !m.fp.ShowHidden
+			return m, m.fp.Init()
+		}
+	}
 	var cmd tea.Cmd
 	m.fp, cmd = m.fp.Update(msg)
+	// Selecting a file queues it and keeps the picker open so several files can
+	// be attached in one visit; Esc closes it.
 	if ok, path := m.fp.DidSelectFile(msg); ok {
-		m.attachments = append(m.attachments, path)
-		m.overlay = overlayNone
-		m.ta.Focus()
-		return m, textarea.Blink
-	}
-	if k, isKey := msg.(tea.KeyMsg); isKey && k.Type == tea.KeyEsc {
-		m.overlay = overlayNone
-		m.ta.Focus()
-		return m, textarea.Blink
+		m.addAttachment(path)
 	}
 	return m, cmd
 }
@@ -619,9 +642,7 @@ func (m model) updateMain(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case "ctrl+o":
 			if !m.streaming {
-				m.overlay = overlayPicker
-				m.ta.Blur()
-				return m, m.fp.Init()
+				return m, m.openPicker()
 			}
 			return m, nil
 
@@ -860,24 +881,50 @@ func (m *model) handleCommand(val string) (bool, tea.Cmd) {
 
 	case "/attach", "/a":
 		if arg != "" {
-			p := expandPath(arg)
-			if _, err := os.Stat(p); err == nil {
-				m.attachments = append(m.attachments, p)
-			} else {
-				m.commitSystem("файл не найден: " + p)
-			}
+			m.addAttachment(arg)
 			return true, nil
 		}
-		m.overlay = overlayPicker
-		m.ta.Blur()
-		return true, m.fp.Init()
+		return true, m.openPicker()
 
 	case "/files":
+		if arg == "clear" {
+			m.attachments = nil
+			m.commitSystem("вложения очищены")
+			return true, nil
+		}
 		if len(m.attachments) == 0 {
 			m.commitSystem("вложений нет")
-		} else {
-			m.commitSystem("вложения: " + strings.Join(m.attachments, ", "))
+			return true, nil
 		}
+		var b strings.Builder
+		b.WriteString("вложения (/detach <N> — убрать, /files clear — очистить):")
+		for i, a := range m.attachments {
+			b.WriteString(fmt.Sprintf("\n  %d. %s %s", i+1, attachIcon(a), a))
+		}
+		m.commitSystem(b.String())
+		return true, nil
+
+	case "/detach", "/d":
+		if len(m.attachments) == 0 {
+			m.commitSystem("вложений нет")
+			return true, nil
+		}
+		idx := len(m.attachments) // default: last
+		if arg != "" {
+			n, err := strconv.Atoi(arg)
+			if err != nil {
+				m.commitSystem("использование: /detach <N>")
+				return true, nil
+			}
+			idx = n
+		}
+		if idx < 1 || idx > len(m.attachments) {
+			m.commitSystem("нет вложения №" + arg)
+			return true, nil
+		}
+		removed := m.attachments[idx-1]
+		m.attachments = append(m.attachments[:idx-1], m.attachments[idx:]...)
+		m.commitSystem("убрано: " + filepath.Base(removed))
 		return true, nil
 
 	case "/help":
@@ -916,10 +963,56 @@ func (m *model) buildPrompt(val string) string {
 	return sb.String()
 }
 
+var imageExts = map[string]bool{
+	".png": true, ".jpg": true, ".jpeg": true, ".gif": true,
+	".webp": true, ".bmp": true, ".svg": true,
+}
+
+func isImagePath(p string) bool {
+	return imageExts[strings.ToLower(filepath.Ext(p))]
+}
+
+func attachIcon(p string) string {
+	if isImagePath(p) {
+		return "🖼"
+	}
+	return "📎"
+}
+
+// addAttachment validates and de-duplicates a path before queuing it.
+func (m *model) addAttachment(p string) {
+	p = expandPath(p)
+	info, err := os.Stat(p)
+	if err != nil {
+		m.commitSystem("файл не найден: " + p)
+		return
+	}
+	if info.IsDir() {
+		m.commitSystem("это директория, не файл: " + p)
+		return
+	}
+	for _, a := range m.attachments {
+		if a == p {
+			return
+		}
+	}
+	m.attachments = append(m.attachments, p)
+}
+
+// displayName shortens a path relative to the project when possible.
+func (m model) displayName(p string) string {
+	if m.project != nil {
+		if rel, err := filepath.Rel(m.project.Cwd, p); err == nil && !strings.HasPrefix(rel, "..") {
+			return rel
+		}
+	}
+	return filepath.Base(p)
+}
+
 func attachmentLine(paths []string) string {
 	names := make([]string, len(paths))
 	for i, p := range paths {
-		names[i] = "📎 " + filepath.Base(p)
+		names[i] = attachIcon(p) + " " + filepath.Base(p)
 	}
 	return strings.Join(names, "  ")
 }
@@ -959,9 +1052,13 @@ func (m model) View() string {
 	}
 	switch m.overlay {
 	case overlayPicker:
+		title := " 📎 Файл/картинка · Enter — добавить · Ctrl+H — скрытые · Esc — готово"
+		if n := len(m.attachments); n > 0 {
+			title = fmt.Sprintf(" 📎 Выбрано: %d · Enter — добавить · Ctrl+H — скрытые · Esc — готово", n)
+		}
 		return lipgloss.JoinVertical(lipgloss.Left,
 			m.headerView(),
-			pickerTitleStyle.Render(" 📎 Выбери файл/картинку  ·  Enter — выбрать  ·  Esc — отмена"),
+			pickerTitleStyle.Render(title),
 			m.fp.View(),
 		)
 	case overlayProjects:
@@ -1009,11 +1106,11 @@ func (m model) headerView() string {
 
 func (m model) attachmentsView() string {
 	if len(m.attachments) == 0 {
-		return hintStyle.Render(" нет вложений")
+		return hintStyle.Render(" нет вложений · Ctrl+O — прикрепить")
 	}
 	chips := make([]string, len(m.attachments))
 	for i, a := range m.attachments {
-		chips[i] = chipStyle.Render("📎 " + filepath.Base(a))
+		chips[i] = chipStyle.Render(fmt.Sprintf("%s %d %s", attachIcon(a), i+1, m.displayName(a)))
 	}
 	return " " + strings.Join(chips, " ")
 }
