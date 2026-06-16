@@ -106,10 +106,10 @@ func NewStore() (*Store, error) {
 	return s, nil
 }
 
-func (s *Store) projectsDir() string         { return filepath.Join(s.DataDir, "projects") }
+func (s *Store) projectsDir() string           { return filepath.Join(s.DataDir, "projects") }
 func (s *Store) projectDir(slug string) string { return filepath.Join(s.projectsDir(), slug) }
 func (s *Store) threadsDir(slug string) string { return filepath.Join(s.projectDir(slug), "threads") }
-func (s *Store) configPath() string          { return filepath.Join(s.ConfigDir, "config.toml") }
+func (s *Store) configPath() string            { return filepath.Join(s.ConfigDir, "config.toml") }
 
 // MemoryPath returns the project's memory.md (fed to --append-system-prompt-file).
 func (s *Store) MemoryPath(slug string) string { return filepath.Join(s.projectDir(slug), "memory.md") }

@@ -59,10 +59,10 @@ const helpText = "Команды: /project [имя] (Ctrl+P), /threads (Ctrl+T),
 	"В сообщении можно писать @/путь напрямую. Enter — отправить, Ctrl+J — перенос строки, Esc — отменить ответ."
 
 type model struct {
-	store  *Store
-	config Config
-	engine *Engine
-	perm   *PermissionServer
+	store   *Store
+	config  Config
+	engine  *Engine
+	perm    *PermissionServer
 	permErr error
 
 	project *Project // active project (nil only at the startup switcher)
