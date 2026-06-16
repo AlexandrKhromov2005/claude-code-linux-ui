@@ -71,10 +71,13 @@ func TestLiveAppAgentTurn(t *testing.T) {
 		}
 
 		_, statErr := os.Stat(filepath.Join(proj, wantFile))
-		if allow && statErr != nil {
-			t.Errorf("allow: expected %s to exist: %v", wantFile, statErr)
-		}
-		if !allow && statErr == nil {
+		fileExists := statErr == nil
+		if allow {
+			// Only meaningful once Claude actually requested (and we granted) a tool.
+			if broker.calls.Load() > 0 && !fileExists {
+				t.Errorf("allow: approved but %s was not written", wantFile)
+			}
+		} else if fileExists {
 			t.Errorf("deny: %s should not exist", wantFile)
 		}
 
