@@ -5,9 +5,35 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 )
+
+// Mode selects the tool policy a turn runs under.
+type Mode int
+
+const (
+	ModeChat  Mode = iota // read-only: Read, Grep, Glob; everything else denied
+	ModeAgent             // full toolset, gated through the approval modal
+)
+
+func (m Mode) String() string {
+	if m == ModeAgent {
+		return "agent"
+	}
+	return "chat"
+}
+
+func parseMode(s string) Mode {
+	if strings.EqualFold(strings.TrimSpace(s), "agent") {
+		return ModeAgent
+	}
+	return ModeChat
+}
+
+// chatTools is the read-only allowlist for chat mode.
+const chatTools = "Read,Grep,Glob"
 
 // EventKind classifies streamed events coming out of the claude CLI.
 type EventKind int
@@ -33,14 +59,20 @@ type Event struct {
 	Err       error
 }
 
-// Engine drives Claude Code in headless mode (`claude -p`) and keeps the
-// session id so follow-up turns continue the same conversation via --resume.
+// Engine drives Claude Code in headless mode (`claude -p`). It is configured
+// per project/mode; the session id lives with the thread and is passed in per
+// turn via Send so follow-ups continue through --resume.
 type Engine struct {
-	BinPath      string // path to the `claude` binary
-	Model        string // optional --model override ("" = CLI default)
-	AllowedTools string // comma-separated --allowedTools (read-only by default)
+	BinPath    string // path to the `claude` binary
+	Model      string // optional --model override ("" = CLI default)
+	Cwd        string // process working directory (project root)
+	MemoryFile string // --append-system-prompt-file path ("" = none)
+	Mode       Mode
 
-	sessionID string // captured from the first turn, reused on --resume
+	// Agent-mode wiring (set up by the permission server in M3).
+	PermPromptTool string // e.g. mcp__permctl__approve
+	MCPConfig      string // inline JSON for --mcp-config
+	SettingsJSON   string // inline JSON for --settings (allow/deny rules)
 }
 
 // rawEvent is a permissive view of one NDJSON line from --output-format stream-json.
@@ -75,15 +107,10 @@ type streamInner struct {
 	} `json:"content_block"`
 }
 
-// SessionID exposes the current session id (empty before the first turn).
-func (e *Engine) SessionID() string { return e.sessionID }
-
-// ResetSession forgets the conversation so the next turn starts fresh.
-func (e *Engine) ResetSession() { e.sessionID = "" }
-
-// Send launches one turn and returns a channel of events. The channel is
-// closed once the underlying process exits. Cancel ctx to abort the turn.
-func (e *Engine) Send(ctx context.Context, prompt string) <-chan Event {
+// Send launches one turn and returns a channel of events. resumeID continues an
+// existing Claude session when non-empty. The channel is closed once the
+// process exits. Cancel ctx to abort the turn.
+func (e *Engine) Send(ctx context.Context, prompt, resumeID string) <-chan Event {
 	out := make(chan Event, 128)
 
 	args := []string{
@@ -95,14 +122,20 @@ func (e *Engine) Send(ctx context.Context, prompt string) <-chan Event {
 	if e.Model != "" {
 		args = append(args, "--model", e.Model)
 	}
-	if e.AllowedTools != "" {
-		args = append(args, "--allowedTools", e.AllowedTools)
+	if e.MemoryFile != "" {
+		if _, err := os.Stat(e.MemoryFile); err == nil {
+			args = append(args, "--append-system-prompt-file", e.MemoryFile)
+		}
 	}
-	if e.sessionID != "" {
-		args = append(args, "--resume", e.sessionID)
+	if resumeID != "" {
+		args = append(args, "--resume", resumeID)
 	}
+	args = append(args, e.modeArgs()...)
 
 	cmd := exec.CommandContext(ctx, e.BinPath, args...)
+	if e.Cwd != "" {
+		cmd.Dir = e.Cwd
+	}
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		out <- Event{Kind: EvError, Err: err}
@@ -139,9 +172,6 @@ func (e *Engine) Send(ctx context.Context, prompt string) <-chan Event {
 			case "system":
 				switch re.Subtype {
 				case "init":
-					if re.SessionID != "" {
-						e.sessionID = re.SessionID
-					}
 					out <- Event{Kind: EvSystemInit, SessionID: re.SessionID, Model: re.Model}
 				case "api_retry":
 					out <- Event{Kind: EvRetry, Attempt: re.Attempt}
@@ -164,9 +194,6 @@ func (e *Engine) Send(ctx context.Context, prompt string) <-chan Event {
 				}
 
 			case "result":
-				if re.SessionID != "" {
-					e.sessionID = re.SessionID
-				}
 				if re.IsError {
 					msg := strings.TrimSpace(re.Result)
 					if msg == "" {
@@ -189,4 +216,24 @@ func (e *Engine) Send(ctx context.Context, prompt string) <-chan Event {
 	}()
 
 	return out
+}
+
+// modeArgs returns the tool-policy flags for the engine's current mode.
+func (e *Engine) modeArgs() []string {
+	switch e.Mode {
+	case ModeAgent:
+		args := []string{"--permission-mode", "default"}
+		if e.PermPromptTool != "" {
+			args = append(args, "--permission-prompt-tool", e.PermPromptTool)
+		}
+		if e.MCPConfig != "" {
+			args = append(args, "--mcp-config", e.MCPConfig)
+		}
+		if e.SettingsJSON != "" {
+			args = append(args, "--settings", e.SettingsJSON)
+		}
+		return args
+	default:
+		return []string{"--allowedTools", chatTools, "--permission-mode", "dontAsk"}
+	}
 }

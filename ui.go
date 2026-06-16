@@ -4,8 +4,10 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/bubbles/filepicker"
 	"github.com/charmbracelet/bubbles/spinner"
@@ -30,15 +32,32 @@ type message struct {
 	rendered string // styled string ready for the viewport
 }
 
+type overlayKind int
+
+const (
+	overlayNone overlayKind = iota
+	overlayPicker
+	overlayProjects
+	overlayThreads
+)
+
 // tea.Msg types
 type eventMsg Event
 type streamClosedMsg struct{}
+type memoryEditedMsg struct{ err error }
 
-const helpText = "Команды: /attach <путь> (или Ctrl+O — пикер), /files, /clear (новая сессия), /help, /quit. " +
-	"В сообщении можно писать @/путь/к/файлу напрямую. Enter — отправить, Ctrl+J — перенос строки, Esc — отменить ответ."
+const helpText = "Команды: /project [имя] (Ctrl+P), /threads (Ctrl+T), /new, /resume <id>, /memory, " +
+	"/attach <путь> (Ctrl+O), /files, /help, /quit. " +
+	"В сообщении можно писать @/путь напрямую. Enter — отправить, Ctrl+J — перенос строки, Esc — отменить ответ."
 
 type model struct {
+	store  *Store
+	config Config
 	engine *Engine
+
+	project *Project // active project (nil only at the startup switcher)
+	thread  *Thread  // active thread
+	mode    Mode
 
 	vp   viewport.Model
 	ta   textarea.Model
@@ -52,8 +71,12 @@ type model struct {
 	streamBuf     string
 	streaming     bool
 	turnHadResult bool
-	picker        bool
+	overlay       overlayKind
 	status        string
+	pendingHint   string
+
+	projList selList
+	thrList  selList
 
 	sessionShort string
 	modelName    string
@@ -67,16 +90,25 @@ type model struct {
 }
 
 func newModel() (model, error) {
-	bin := os.Getenv("CLAUDE_BIN")
+	store, err := NewStore()
+	if err != nil {
+		return model{}, err
+	}
+	cfg, err := store.LoadConfig()
+	if err != nil {
+		return model{}, err
+	}
+
+	bin := cfg.ClaudeBin
+	if v := os.Getenv("CLAUDE_BIN"); v != "" {
+		bin = v
+	}
 	if bin == "" {
 		bin = "claude"
 	}
-	tools := os.Getenv("CLAUDE_TUI_TOOLS")
-	if tools == "" {
-		// Read-only defaults: Claude can read attachments and explore, but
-		// won't silently edit files or run shell commands. Add Bash,Edit,Write
-		// (or set CLAUDE_TUI_TOOLS) to enable agentic actions without prompts.
-		tools = "Read,Grep,Glob"
+	mdl := cfg.DefaultModel
+	if v := os.Getenv("CLAUDE_TUI_MODEL"); v != "" {
+		mdl = v
 	}
 
 	ta := textarea.New()
@@ -101,20 +133,231 @@ func newModel() (model, error) {
 	fp.AutoHeight = false
 
 	m := model{
-		engine: &Engine{
-			BinPath:      bin,
-			Model:        os.Getenv("CLAUDE_TUI_MODEL"),
-			AllowedTools: tools,
-		},
-		ta: ta,
-		sp: sp,
-		fp: fp,
+		store:  store,
+		config: cfg,
+		engine: &Engine{BinPath: bin, Model: mdl, Mode: ModeChat},
+		mode:   parseMode(cfg.DefaultMode),
+		ta:     ta,
+		sp:     sp,
+		fp:     fp,
+	}
+
+	cwd, _ := os.Getwd()
+	switch existing, _ := store.ProjectForCwd(cwd); {
+	case existing != nil:
+		m.openProject(existing)
+	case cfg.LastProject != "":
+		if p, err := store.LoadProject(cfg.LastProject); err == nil {
+			m.openProject(p)
+			m.pendingHint = "Текущая папка не проект. Ctrl+P → «использовать текущую папку»: " + cwd
+		} else {
+			m.openProjectSwitcher()
+		}
+	default:
+		m.openProjectSwitcher()
 	}
 	return m, nil
 }
 
 func (m model) Init() tea.Cmd {
 	return textarea.Blink
+}
+
+// ---- project / thread lifecycle -------------------------------------------
+
+func (m *model) configureEngine() {
+	if m.project == nil {
+		return
+	}
+	m.engine.Cwd = m.project.Cwd
+	m.engine.MemoryFile = m.store.MemoryPath(m.project.Slug())
+	m.engine.Mode = m.mode
+	if m.project.Model != "" {
+		m.engine.Model = m.project.Model
+	} else {
+		m.engine.Model = m.config.DefaultModel
+	}
+}
+
+func (m *model) openProject(p *Project) {
+	m.project = p
+	m.mode = parseMode(p.Mode)
+	m.configureEngine()
+	m.config.LastProject = p.Slug()
+	_ = m.store.SaveConfig(m.config)
+	m.startNewThread()
+}
+
+func (m *model) startNewThread() {
+	m.thread = m.store.NewThread()
+	m.messages = nil
+	m.streamBuf = ""
+	m.streaming = false
+	m.sessionShort = ""
+	m.costUSD = 0
+	if m.ready {
+		m.rerenderAll()
+		m.refreshViewport()
+	}
+}
+
+func (m *model) openThread(t *Thread) {
+	m.thread = t
+	m.messages = m.messagesFromThread(t)
+	m.streamBuf = ""
+	m.sessionShort = ""
+	if t.ClaudeSessionID != "" {
+		m.sessionShort = shortID(t.ClaudeSessionID)
+	}
+	if m.ready {
+		m.rerenderAll()
+		m.refreshViewport()
+	}
+}
+
+func (m *model) messagesFromThread(t *Thread) []message {
+	out := make([]message, 0, len(t.Messages))
+	for _, msg := range t.Messages {
+		var r role
+		switch msg.Role {
+		case "user":
+			r = roleUser
+		case "assistant":
+			r = roleAssistant
+		default:
+			r = roleSystem
+		}
+		out = append(out, message{role: r, content: msg.Content})
+	}
+	return out
+}
+
+func (m *model) findProject(q string) *Project {
+	projects, _ := m.store.ListProjects()
+	q = strings.ToLower(strings.TrimSpace(q))
+	for _, p := range projects {
+		if p.Slug() == q || strings.ToLower(p.Name) == q {
+			return p
+		}
+	}
+	return nil
+}
+
+func (m *model) persistUser(content string) {
+	if m.project == nil || m.thread == nil {
+		return
+	}
+	m.thread.Messages = append(m.thread.Messages, Msg{Role: "user", Content: content, Ts: time.Now()})
+	if m.thread.Title == "" {
+		m.thread.Title = makeTitle(content)
+	}
+	_ = m.store.SaveThread(m.project.Slug(), m.thread)
+}
+
+func (m *model) persistAssistant(content string) {
+	if m.project == nil || m.thread == nil {
+		return
+	}
+	m.thread.Messages = append(m.thread.Messages, Msg{Role: "assistant", Content: content, Ts: time.Now()})
+	_ = m.store.SaveThread(m.project.Slug(), m.thread)
+}
+
+func (m *model) setSession(id string) {
+	if id == "" {
+		return
+	}
+	m.sessionShort = shortID(id)
+	if m.thread != nil {
+		m.thread.ClaudeSessionID = id
+		if m.project != nil {
+			_ = m.store.SaveThread(m.project.Slug(), m.thread)
+		}
+	}
+}
+
+func makeTitle(s string) string {
+	s = strings.TrimSpace(s)
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		s = s[:i]
+	}
+	r := []rune(s)
+	if len(r) > 60 {
+		return string(r[:57]) + "…"
+	}
+	return s
+}
+
+// ---- overlays -------------------------------------------------------------
+
+func (m *model) openProjectSwitcher() {
+	cwd, _ := os.Getwd()
+	var items []selItem
+	if existing, _ := m.store.ProjectForCwd(cwd); existing == nil {
+		items = append(items, selItem{title: "+ Использовать текущую папку", subtitle: cwd, action: "use-cwd"})
+	}
+	projects, _ := m.store.ListProjects()
+	for _, p := range projects {
+		title := p.Name
+		if m.project != nil && p.Slug() == m.project.Slug() {
+			title += " (текущий)"
+		}
+		items = append(items, selItem{id: p.Slug(), title: title, subtitle: p.Cwd})
+	}
+	m.projList = selList{title: "Проекты", items: items, hint: "↑↓ · Enter — открыть · Esc — закрыть"}
+	m.overlay = overlayProjects
+	m.ta.Blur()
+}
+
+func (m *model) buildThreadList() {
+	items := []selItem{{title: "+ Новый тред", action: "new-thread"}}
+	threads, _ := m.store.ListThreads(m.project.Slug())
+	for _, t := range threads {
+		title := t.Title
+		if title == "" {
+			title = "(без названия)"
+		}
+		if m.thread != nil && t.ID == m.thread.ID {
+			title += " (текущий)"
+		}
+		sub := t.Updated.Format("2006-01-02 15:04") + "  ·  " + fmt.Sprintf("%d сообщ. · id:%s", len(t.Messages), t.ID)
+		items = append(items, selItem{id: t.ID, title: title, subtitle: sub})
+	}
+	m.thrList = selList{
+		title: "Треды — " + m.project.Name,
+		items: items,
+		hint:  "↑↓ · Enter — открыть · d — удалить · Esc — закрыть",
+	}
+}
+
+func (m *model) openThreadBrowser() {
+	if m.project == nil {
+		return
+	}
+	m.buildThreadList()
+	m.overlay = overlayThreads
+	m.ta.Blur()
+}
+
+func (m model) useCurrentFolder() (tea.Model, tea.Cmd) {
+	cwd, err := os.Getwd()
+	if err != nil {
+		m.commitSystem("не удалось определить текущую папку: " + err.Error())
+		return m, nil
+	}
+	p, err := m.store.ProjectForCwd(cwd)
+	if err == nil && p == nil {
+		p, err = m.store.CreateProject("", cwd)
+	}
+	if err != nil {
+		m.commitSystem("не удалось создать проект: " + err.Error())
+		return m, nil
+	}
+	m.openProject(p)
+	m.overlay = overlayNone
+	m.ta.Focus()
+	m.commitSystem("проект: " + p.Name + "  ·  " + p.Cwd)
+	m.refreshViewport()
+	return m, textarea.Blink
 }
 
 // ---- layout & rendering ---------------------------------------------------
@@ -139,7 +382,7 @@ func (m *model) layout() {
 		m.vp.Height = vpH
 	}
 	m.ta.SetWidth(m.width - 4)
-	m.fp.Height = vpH - 1
+	m.fp.SetHeight(vpH - 1)
 
 	cw := m.contentWidth()
 	r, err := glamour.NewTermRenderer(glamour.WithAutoStyle(), glamour.WithWordWrap(cw))
@@ -171,7 +414,6 @@ func (m *model) renderAssistant(s string) string {
 	return lipgloss.JoinVertical(lipgloss.Left, asstLabelStyle.Render("▌ Claude"), body)
 }
 
-// renderAssistantLive shows in-flight text without glamour (avoids reflow flicker).
 func (m *model) renderAssistantLive(s string) string {
 	body := bodyStyle.Width(m.contentWidth()).Render(s)
 	return lipgloss.JoinVertical(lipgloss.Left, asstLabelStyle.Render("▌ Claude"), body)
@@ -199,6 +441,9 @@ func (m *model) rerenderAll() {
 }
 
 func (m *model) refreshViewport() {
+	if m.vp.Width == 0 && m.vp.Height == 0 {
+		return // not laid out yet
+	}
 	var b strings.Builder
 	for _, msg := range m.messages {
 		b.WriteString(msg.rendered)
@@ -214,40 +459,157 @@ func (m *model) refreshViewport() {
 // ---- update ---------------------------------------------------------------
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-	// File picker overlay grabs input while open.
-	if m.picker {
-		var cmd tea.Cmd
-		m.fp, cmd = m.fp.Update(msg)
-		if ok, path := m.fp.DidSelectFile(msg); ok {
-			m.attachments = append(m.attachments, path)
-			m.picker = false
-			m.ta.Focus()
-			return m, textarea.Blink
-		}
-		if k, isKey := msg.(tea.KeyMsg); isKey && (k.Type == tea.KeyEsc || k.String() == "ctrl+c") {
-			m.picker = false
-			m.ta.Focus()
-			return m, textarea.Blink
-		}
-		return m, cmd
+	if k, ok := msg.(tea.KeyMsg); ok && k.String() == "ctrl+c" {
+		return m, tea.Quit
 	}
 
-	var cmds []tea.Cmd
-
-	switch msg := msg.(type) {
-	case tea.WindowSizeMsg:
-		m.width, m.height = msg.Width, msg.Height
+	if ws, ok := msg.(tea.WindowSizeMsg); ok {
+		m.width, m.height = ws.Width, ws.Height
 		m.layout()
 		m.rerenderAll()
 		m.refreshViewport()
-		m.ready = true
+		if !m.ready {
+			m.ready = true
+			if m.pendingHint != "" {
+				m.commitSystem(m.pendingHint)
+				m.pendingHint = ""
+				m.refreshViewport()
+			}
+		}
 		return m, nil
+	}
 
+	switch m.overlay {
+	case overlayPicker:
+		return m.updatePicker(msg)
+	case overlayProjects:
+		return m.updateProjects(msg)
+	case overlayThreads:
+		return m.updateThreads(msg)
+	}
+	return m.updateMain(msg)
+}
+
+func (m model) updatePicker(msg tea.Msg) (tea.Model, tea.Cmd) {
+	var cmd tea.Cmd
+	m.fp, cmd = m.fp.Update(msg)
+	if ok, path := m.fp.DidSelectFile(msg); ok {
+		m.attachments = append(m.attachments, path)
+		m.overlay = overlayNone
+		m.ta.Focus()
+		return m, textarea.Blink
+	}
+	if k, isKey := msg.(tea.KeyMsg); isKey && k.Type == tea.KeyEsc {
+		m.overlay = overlayNone
+		m.ta.Focus()
+		return m, textarea.Blink
+	}
+	return m, cmd
+}
+
+func (m model) updateProjects(msg tea.Msg) (tea.Model, tea.Cmd) {
+	k, ok := msg.(tea.KeyMsg)
+	if !ok {
+		return m, nil
+	}
+	switch k.String() {
+	case "up", "k":
+		m.projList.move(-1)
+	case "down", "j":
+		m.projList.move(1)
+	case "esc":
+		if m.project == nil {
+			return m.useCurrentFolder()
+		}
+		m.overlay = overlayNone
+		m.ta.Focus()
+		return m, textarea.Blink
+	case "enter":
+		it, ok := m.projList.selected()
+		if !ok {
+			return m, nil
+		}
+		if it.action == "use-cwd" {
+			return m.useCurrentFolder()
+		}
+		p, err := m.store.LoadProject(it.id)
+		if err != nil {
+			m.overlay = overlayNone
+			m.commitSystem("не удалось открыть проект: " + err.Error())
+			m.refreshViewport()
+			return m, nil
+		}
+		m.openProject(p)
+		m.overlay = overlayNone
+		m.ta.Focus()
+		m.commitSystem("проект: " + p.Name + "  ·  " + p.Cwd)
+		m.refreshViewport()
+		return m, textarea.Blink
+	}
+	return m, nil
+}
+
+func (m model) updateThreads(msg tea.Msg) (tea.Model, tea.Cmd) {
+	k, ok := msg.(tea.KeyMsg)
+	if !ok {
+		return m, nil
+	}
+	switch k.String() {
+	case "up", "k":
+		m.thrList.move(-1)
+	case "down", "j":
+		m.thrList.move(1)
+	case "esc":
+		m.overlay = overlayNone
+		m.ta.Focus()
+		return m, textarea.Blink
+	case "d":
+		it, ok := m.thrList.selected()
+		if ok && it.action == "" && it.id != "" {
+			_ = m.store.DeleteThread(m.project.Slug(), it.id)
+			if m.thread != nil && m.thread.ID == it.id {
+				m.startNewThread()
+			}
+			m.buildThreadList()
+			if m.thrList.cursor >= len(m.thrList.items) {
+				m.thrList.cursor = len(m.thrList.items) - 1
+			}
+		}
+	case "enter":
+		it, ok := m.thrList.selected()
+		if !ok {
+			return m, nil
+		}
+		if it.action == "new-thread" {
+			m.startNewThread()
+			m.overlay = overlayNone
+			m.ta.Focus()
+			m.commitSystem("новый тред")
+			m.refreshViewport()
+			return m, textarea.Blink
+		}
+		t, err := m.store.LoadThread(m.project.Slug(), it.id)
+		if err != nil {
+			m.overlay = overlayNone
+			m.commitSystem("не удалось открыть тред: " + err.Error())
+			m.refreshViewport()
+			return m, nil
+		}
+		m.openThread(t)
+		m.overlay = overlayNone
+		m.ta.Focus()
+		m.refreshViewport()
+		return m, textarea.Blink
+	}
+	return m, nil
+}
+
+func (m model) updateMain(msg tea.Msg) (tea.Model, tea.Cmd) {
+	var cmds []tea.Cmd
+
+	switch msg := msg.(type) {
 	case tea.KeyMsg:
 		switch msg.String() {
-		case "ctrl+c":
-			return m, tea.Quit
-
 		case "esc":
 			if m.streaming && m.cancel != nil {
 				m.cancel()
@@ -257,10 +619,18 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case "ctrl+o":
 			if !m.streaming {
-				m.picker = true
+				m.overlay = overlayPicker
 				m.ta.Blur()
 				return m, m.fp.Init()
 			}
+			return m, nil
+
+		case "ctrl+p":
+			m.openProjectSwitcher()
+			return m, nil
+
+		case "ctrl+t":
+			m.openThreadBrowser()
 			return m, nil
 
 		case "ctrl+j":
@@ -280,6 +650,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.refreshViewport()
 				return m, cmd
 			}
+			if m.project == nil {
+				m.commitSystem("сначала выберите проект (Ctrl+P)")
+				m.ta.Reset()
+				m.refreshViewport()
+				return m, nil
+			}
 
 			prompt := m.buildPrompt(val)
 			disp := val
@@ -291,6 +667,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				content:  disp,
 				rendered: m.renderUser(disp),
 			})
+			m.persistUser(disp)
 			m.attachments = nil
 			m.ta.Reset()
 
@@ -308,9 +685,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		ev := Event(msg)
 		switch ev.Kind {
 		case EvSystemInit:
-			if ev.SessionID != "" {
-				m.sessionShort = shortID(ev.SessionID)
-			}
+			m.setSession(ev.SessionID)
 			if ev.Model != "" {
 				m.modelName = ev.Model
 			}
@@ -319,20 +694,19 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.streamBuf += ev.Text
 			m.refreshViewport()
 		case EvToolStart:
-			m.status = "🔧 " + ev.Tool
+			m.status = "⚙ " + ev.Tool
 		case EvRetry:
 			m.status = fmt.Sprintf("повтор запроса (#%d)…", ev.Attempt)
 		case EvResult:
 			m.turnHadResult = true
-			if ev.SessionID != "" {
-				m.sessionShort = shortID(ev.SessionID)
-			}
+			m.setSession(ev.SessionID)
 			m.costUSD += ev.CostUSD
 			final := m.streamBuf
 			if strings.TrimSpace(final) == "" {
 				final = ev.Text
 			}
 			m.commitAssistant(final)
+			m.persistAssistant(final)
 			m.streaming = false
 			m.status = ""
 			m.refreshViewport()
@@ -353,6 +727,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.streaming = false
 			if !m.turnHadResult && strings.TrimSpace(m.streamBuf) != "" {
 				m.commitAssistant(m.streamBuf)
+				m.persistAssistant(m.streamBuf)
 			}
 			m.streamBuf = ""
 			if m.status != "отменено" {
@@ -360,6 +735,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.refreshViewport()
 		}
+		return m, nil
+
+	case memoryEditedMsg:
+		if msg.err != nil {
+			m.commitSystem("ошибка редактора: " + msg.err.Error())
+		} else {
+			m.commitSystem("memory.md обновлён")
+		}
+		m.refreshViewport()
 		return m, nil
 
 	case spinner.TickMsg:
@@ -371,7 +755,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(cmds...)
 	}
 
-	// Scrolling keys go to the viewport; everything else to the textarea.
 	if k, ok := msg.(tea.KeyMsg); ok {
 		switch k.String() {
 		case "pgup", "pgdown", "ctrl+u", "ctrl+d":
@@ -398,7 +781,11 @@ func (m *model) commitSystem(s string) {
 func (m *model) startTurn(prompt string) tea.Cmd {
 	ctx, cancel := context.WithCancel(context.Background())
 	m.cancel = cancel
-	ch := m.engine.Send(ctx, prompt)
+	resume := ""
+	if m.thread != nil {
+		resume = m.thread.ClaudeSessionID
+	}
+	ch := m.engine.Send(ctx, prompt, resume)
 	m.streamCh = ch
 	return waitEvent(ch)
 }
@@ -420,19 +807,60 @@ func (m *model) handleCommand(val string) (bool, tea.Cmd) {
 		return false, nil
 	}
 	fields := strings.Fields(val)
+	arg := strings.TrimSpace(strings.TrimPrefix(val, fields[0]))
 	switch fields[0] {
 	case "/quit", "/q", "/exit":
 		return true, tea.Quit
-	case "/clear":
-		m.messages = nil
-		m.engine.ResetSession()
-		m.sessionShort = ""
-		m.costUSD = 0
-		m.commitSystem("новая сессия")
+
+	case "/new", "/clear":
+		m.startNewThread()
+		m.commitSystem("новый тред")
 		return true, nil
+
+	case "/project", "/p":
+		if arg != "" {
+			if p := m.findProject(arg); p != nil {
+				m.openProject(p)
+				m.commitSystem("проект: " + p.Name + "  ·  " + p.Cwd)
+				return true, nil
+			}
+			m.commitSystem("проект не найден: " + arg)
+		}
+		m.openProjectSwitcher()
+		return true, nil
+
+	case "/threads", "/t":
+		if m.project == nil {
+			m.commitSystem("нет активного проекта")
+			return true, nil
+		}
+		m.openThreadBrowser()
+		return true, nil
+
+	case "/resume":
+		if m.project == nil {
+			m.commitSystem("нет активного проекта")
+			return true, nil
+		}
+		if arg == "" {
+			m.commitSystem("использование: /resume <id>")
+			return true, nil
+		}
+		t, err := m.store.LoadThread(m.project.Slug(), arg)
+		if err != nil {
+			m.commitSystem("тред не найден: " + arg)
+			return true, nil
+		}
+		m.openThread(t)
+		m.commitSystem("возобновлён тред: " + t.Title)
+		return true, nil
+
+	case "/memory", "/m":
+		return true, m.cmdEditMemory()
+
 	case "/attach", "/a":
-		if len(fields) >= 2 {
-			p := expandPath(strings.TrimSpace(strings.TrimPrefix(val, fields[0])))
+		if arg != "" {
+			p := expandPath(arg)
 			if _, err := os.Stat(p); err == nil {
 				m.attachments = append(m.attachments, p)
 			} else {
@@ -440,9 +868,10 @@ func (m *model) handleCommand(val string) (bool, tea.Cmd) {
 			}
 			return true, nil
 		}
-		m.picker = true
+		m.overlay = overlayPicker
 		m.ta.Blur()
 		return true, m.fp.Init()
+
 	case "/files":
 		if len(m.attachments) == 0 {
 			m.commitSystem("вложений нет")
@@ -450,11 +879,30 @@ func (m *model) handleCommand(val string) (bool, tea.Cmd) {
 			m.commitSystem("вложения: " + strings.Join(m.attachments, ", "))
 		}
 		return true, nil
+
 	case "/help":
 		m.commitSystem(helpText)
 		return true, nil
 	}
 	return false, nil
+}
+
+func (m *model) cmdEditMemory() tea.Cmd {
+	if m.project == nil {
+		m.commitSystem("нет активного проекта")
+		return nil
+	}
+	path := m.store.MemoryPath(m.project.Slug())
+	editor := os.Getenv("EDITOR")
+	if editor == "" {
+		editor = os.Getenv("VISUAL")
+	}
+	if editor == "" {
+		m.commitSystem("$EDITOR не задан; правьте вручную: " + path)
+		return nil
+	}
+	c := exec.Command(editor, path)
+	return tea.ExecProcess(c, func(err error) tea.Msg { return memoryEditedMsg{err} })
 }
 
 // buildPrompt appends attachments as @-references so Claude Code reads/attaches them.
@@ -497,16 +945,29 @@ func shortID(id string) string {
 
 // ---- view -----------------------------------------------------------------
 
+func (m model) overlayHeight() int {
+	h := m.height - headerH - 1
+	if h < 4 {
+		h = 4
+	}
+	return h
+}
+
 func (m model) View() string {
 	if !m.ready {
 		return "загрузка…"
 	}
-	if m.picker {
+	switch m.overlay {
+	case overlayPicker:
 		return lipgloss.JoinVertical(lipgloss.Left,
 			m.headerView(),
 			pickerTitleStyle.Render(" 📎 Выбери файл/картинку  ·  Enter — выбрать  ·  Esc — отмена"),
 			m.fp.View(),
 		)
+	case overlayProjects:
+		return lipgloss.JoinVertical(lipgloss.Left, m.headerView(), m.projList.view(m.width, m.overlayHeight()))
+	case overlayThreads:
+		return lipgloss.JoinVertical(lipgloss.Left, m.headerView(), m.thrList.view(m.width, m.overlayHeight()))
 	}
 	return lipgloss.JoinVertical(lipgloss.Left,
 		m.headerView(),
@@ -518,18 +979,27 @@ func (m model) View() string {
 }
 
 func (m model) headerView() string {
-	left := titleStyle.Render("⚡ Claude TUI")
-	var meta []string
+	left := titleStyle.Render(" claude-tui ")
+	sep := metaStyle.Render("  ·  ")
+	var parts []string
+	if m.project != nil {
+		parts = append(parts, metaStyle.Render(m.project.Name))
+	}
+	if m.mode == ModeAgent {
+		parts = append(parts, modeAgentStyle.Render("agent"))
+	} else {
+		parts = append(parts, modeChatStyle.Render("chat"))
+	}
 	if m.modelName != "" {
-		meta = append(meta, m.modelName)
+		parts = append(parts, metaStyle.Render(m.modelName))
 	}
 	if m.sessionShort != "" {
-		meta = append(meta, "sess:"+m.sessionShort)
+		parts = append(parts, metaStyle.Render("sess:"+m.sessionShort))
 	}
 	if m.costUSD > 0 {
-		meta = append(meta, fmt.Sprintf("$%.4f", m.costUSD))
+		parts = append(parts, metaStyle.Render(fmt.Sprintf("$%.4f", m.costUSD)))
 	}
-	right := metaStyle.Render(strings.Join(meta, "  ·  "))
+	right := strings.Join(parts, sep)
 	gap := m.width - lipgloss.Width(left) - lipgloss.Width(right) - 1
 	if gap < 1 {
 		gap = 1
@@ -560,7 +1030,7 @@ func (m model) footerView() string {
 	case m.status != "":
 		status = statusStyle.Render(m.status)
 	default:
-		status = hintStyle.Render("Enter — отправить · Ctrl+O — файл · /help — команды · Ctrl+C — выход")
+		status = hintStyle.Render("Enter — отправить · Ctrl+P — проекты · Ctrl+T — треды · Ctrl+O — файл · /help")
 	}
 	return " " + status
 }

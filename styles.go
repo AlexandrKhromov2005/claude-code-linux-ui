@@ -42,4 +42,13 @@ var (
 			Padding(0, 1)
 
 	pickerTitleStyle = lipgloss.NewStyle().Bold(true).Foreground(colAccent)
+
+	overlayTitleStyle = lipgloss.NewStyle().Bold(true).Foreground(colAccent).Padding(0, 1)
+	selCursorStyle    = lipgloss.NewStyle().Bold(true).Foreground(colAccent)
+	selSubSelStyle    = lipgloss.NewStyle().Foreground(colText)
+	selTitleStyle     = lipgloss.NewStyle().Foreground(colText)
+	selSubStyle       = lipgloss.NewStyle().Foreground(colDim)
+
+	modeChatStyle  = lipgloss.NewStyle().Foreground(colUser)
+	modeAgentStyle = lipgloss.NewStyle().Bold(true).Foreground(colAccent)
 )

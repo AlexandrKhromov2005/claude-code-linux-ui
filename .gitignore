@@ -10,6 +10,7 @@
 /PROMPT.md
 /CLAUDE.md
 /.claude/
+/.omc/
 
 # editor / OS
 .DS_Store
