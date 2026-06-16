@@ -6,9 +6,11 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/charmbracelet/bubbles/filepicker"
 	"github.com/charmbracelet/bubbles/spinner"
@@ -42,6 +44,7 @@ const (
 	overlayProjects
 	overlayThreads
 	overlayApprove
+	overlaySearch
 )
 
 // tea.Msg types
@@ -50,7 +53,8 @@ type streamClosedMsg struct{}
 type memoryEditedMsg struct{ err error }
 
 const helpText = "Команды: /project [имя] (Ctrl+P), /threads (Ctrl+T), /new, /resume <id>, /mode chat|agent (Tab), " +
-	"/memory, /attach <путь> (Ctrl+O), /files [clear], /detach [N], /help, /quit. " +
+	"/search <текст>, /export [путь], /memory, /attach <путь> (Ctrl+O), /files [clear], /detach [N], " +
+	"/theme [имя], /budget [usd], /mcp, /help, /quit. " +
 	"В agent-режиме правки и команды проходят через модалку подтверждения. " +
 	"В сообщении можно писать @/путь напрямую. Enter — отправить, Ctrl+J — перенос строки, Esc — отменить ответ."
 
@@ -85,8 +89,11 @@ type model struct {
 	pending     *ApprovalRequest // tool call awaiting an approve/deny answer
 	remembering bool             // editing the allow-rule before allowing
 
-	projList selList
-	thrList  selList
+	projList   selList
+	thrList    selList
+	searchList selList
+
+	budgetWarned bool
 
 	sessionShort string
 	modelName    string
@@ -120,6 +127,8 @@ func newModel() (model, error) {
 	if v := os.Getenv("CLAUDE_TUI_MODEL"); v != "" {
 		mdl = v
 	}
+
+	applyTheme(cfg.Theme)
 
 	ta := textarea.New()
 	ta.Placeholder = "Спроси что-нибудь…  (Ctrl+O — прикрепить файл)"
@@ -413,6 +422,71 @@ func (m *model) openPicker() tea.Cmd {
 	return m.fp.Init()
 }
 
+// runSearch scans the project's thread transcripts for q and opens a results list.
+func (m *model) runSearch(q string) {
+	ql := strings.ToLower(q)
+	threads, _ := m.store.ListThreads(m.project.Slug())
+	var items []selItem
+	for _, t := range threads {
+		snippet := ""
+		matched := strings.Contains(strings.ToLower(t.Title), ql)
+		for _, msg := range t.Messages {
+			if idx := strings.Index(strings.ToLower(msg.Content), ql); idx >= 0 {
+				matched = true
+				snippet = makeSnippet(msg.Content, idx, len(q))
+				break
+			}
+		}
+		if !matched {
+			continue
+		}
+		title := t.Title
+		if title == "" {
+			title = "(без названия)"
+		}
+		sub := snippet
+		if sub == "" {
+			sub = t.Updated.Format("2006-01-02 15:04")
+		}
+		items = append(items, selItem{id: t.ID, title: title, subtitle: sub})
+	}
+	m.searchList = selList{
+		title: fmt.Sprintf("Поиск «%s» — найдено %d", q, len(items)),
+		items: items,
+		hint:  "↑↓ · Enter — открыть · Esc — закрыть",
+	}
+	m.overlay = overlaySearch
+	m.ta.Blur()
+}
+
+// makeSnippet returns a one-line excerpt around a match.
+func makeSnippet(content string, idx, qlen int) string {
+	content = strings.ReplaceAll(content, "\n", " ")
+	start := idx - 20
+	if start < 0 {
+		start = 0
+	}
+	end := idx + qlen + 30
+	if end > len(content) {
+		end = len(content)
+	}
+	// Snap to rune boundaries so multibyte (e.g. Cyrillic) text is not split.
+	for start > 0 && !utf8.RuneStart(content[start]) {
+		start--
+	}
+	for end < len(content) && !utf8.RuneStart(content[end]) {
+		end++
+	}
+	prefix, suffix := "", ""
+	if start > 0 {
+		prefix = "…"
+	}
+	if end < len(content) {
+		suffix = "…"
+	}
+	return prefix + strings.TrimSpace(content[start:end]) + suffix
+}
+
 func (m model) useCurrentFolder() (tea.Model, tea.Cmd) {
 	cwd, err := os.Getwd()
 	if err != nil {
@@ -574,6 +648,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.updateProjects(msg)
 	case overlayThreads:
 		return m.updateThreads(msg)
+	case overlaySearch:
+		return m.updateSearch(msg)
 	case overlayApprove:
 		return m.updateApprove(msg)
 	}
@@ -682,6 +758,41 @@ func (m model) updateThreads(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.commitSystem("новый тред")
 			m.refreshViewport()
 			return m, textarea.Blink
+		}
+		t, err := m.store.LoadThread(m.project.Slug(), it.id)
+		if err != nil {
+			m.overlay = overlayNone
+			m.commitSystem("не удалось открыть тред: " + err.Error())
+			m.refreshViewport()
+			return m, nil
+		}
+		m.openThread(t)
+		m.overlay = overlayNone
+		m.ta.Focus()
+		m.refreshViewport()
+		return m, textarea.Blink
+	}
+	return m, nil
+}
+
+func (m model) updateSearch(msg tea.Msg) (tea.Model, tea.Cmd) {
+	k, ok := msg.(tea.KeyMsg)
+	if !ok {
+		return m, nil
+	}
+	switch k.String() {
+	case "up", "k":
+		m.searchList.move(-1)
+	case "down", "j":
+		m.searchList.move(1)
+	case "esc":
+		m.overlay = overlayNone
+		m.ta.Focus()
+		return m, textarea.Blink
+	case "enter":
+		it, ok := m.searchList.selected()
+		if !ok {
+			return m, nil
 		}
 		t, err := m.store.LoadThread(m.project.Slug(), it.id)
 		if err != nil {
@@ -896,6 +1007,10 @@ func (m model) updateMain(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.turnHadResult = true
 			m.setSession(ev.SessionID)
 			m.costUSD += ev.CostUSD
+			if m.config.BudgetWarnUSD > 0 && !m.budgetWarned && m.costUSD >= m.config.BudgetWarnUSD {
+				m.budgetWarned = true
+				m.commitSystem(fmt.Sprintf("⚠ бюджет: израсходовано $%.4f (порог $%.2f). С 15.06.2026 расход идёт из месячного Agent SDK-кредита.", m.costUSD, m.config.BudgetWarnUSD))
+			}
 			final := m.streamBuf
 			if strings.TrimSpace(final) == "" {
 				final = ev.Text
@@ -1070,6 +1185,84 @@ func (m *model) handleCommand(val string) (bool, tea.Cmd) {
 	case "/memory", "/m":
 		return true, m.cmdEditMemory()
 
+	case "/search", "/s":
+		if m.project == nil {
+			m.commitSystem("нет активного проекта")
+			return true, nil
+		}
+		if arg == "" {
+			m.commitSystem("использование: /search <текст>")
+			return true, nil
+		}
+		m.runSearch(arg)
+		return true, nil
+
+	case "/export":
+		if m.thread == nil || len(m.thread.Messages) == 0 {
+			m.commitSystem("нечего экспортировать")
+			return true, nil
+		}
+		path := defaultExportPath(m.project, m.thread)
+		if arg != "" {
+			path = expandPath(arg)
+		}
+		if err := exportThreadMarkdown(m.thread, m.project, path); err != nil {
+			m.commitSystem("ошибка экспорта: " + err.Error())
+		} else {
+			m.commitSystem("экспортировано: " + path)
+		}
+		return true, nil
+
+	case "/theme":
+		if arg == "" {
+			m.commitSystem("темы: " + strings.Join(themeNames(), ", ") + " · текущая: " + m.config.Theme)
+			return true, nil
+		}
+		if _, ok := themes[arg]; !ok {
+			m.commitSystem("неизвестная тема: " + arg + " (есть: " + strings.Join(themeNames(), ", ") + ")")
+			return true, nil
+		}
+		applyTheme(arg)
+		m.config.Theme = arg
+		_ = m.store.SaveConfig(m.config)
+		m.sp.Style = lipgloss.NewStyle().Foreground(colAccent)
+		m.layout()
+		m.rerenderAll()
+		m.commitSystem("тема: " + arg)
+		return true, nil
+
+	case "/budget":
+		if arg == "" {
+			if m.config.BudgetWarnUSD > 0 {
+				m.commitSystem(fmt.Sprintf("порог: $%.2f · сессия: $%.4f", m.config.BudgetWarnUSD, m.costUSD))
+			} else {
+				m.commitSystem("предупреждение о бюджете выключено · /budget <usd> — задать порог")
+			}
+			return true, nil
+		}
+		v, err := strconv.ParseFloat(arg, 64)
+		if err != nil || v < 0 {
+			m.commitSystem("использование: /budget <долл.>")
+			return true, nil
+		}
+		m.config.BudgetWarnUSD = v
+		m.budgetWarned = false
+		_ = m.store.SaveConfig(m.config)
+		if v == 0 {
+			m.commitSystem("предупреждение о бюджете выключено")
+		} else {
+			m.commitSystem(fmt.Sprintf("порог предупреждения: $%.2f", v))
+		}
+		return true, nil
+
+	case "/mcp":
+		note := "approval-сервер: недоступен"
+		if m.perm != nil && m.perm.Addr() != "" {
+			note = "approval-сервер: " + permServerName + " @ " + m.perm.Addr() + " (только в agent)"
+		}
+		m.commitSystem(note + "\nОстальные MCP-серверы наследуются из конфигурации Claude Code (~/.claude.json, .mcp.json).")
+		return true, nil
+
 	case "/attach", "/a":
 		if arg != "" {
 			m.addAttachment(arg)
@@ -1182,10 +1375,8 @@ func (m *model) addAttachment(p string) {
 		m.commitSystem("это директория, не файл: " + p)
 		return
 	}
-	for _, a := range m.attachments {
-		if a == p {
-			return
-		}
+	if slices.Contains(m.attachments, p) {
+		return
 	}
 	m.attachments = append(m.attachments, p)
 }
@@ -1256,6 +1447,8 @@ func (m model) View() string {
 		return lipgloss.JoinVertical(lipgloss.Left, m.headerView(), m.projList.view(m.width, m.overlayHeight()))
 	case overlayThreads:
 		return lipgloss.JoinVertical(lipgloss.Left, m.headerView(), m.thrList.view(m.width, m.overlayHeight()))
+	case overlaySearch:
+		return lipgloss.JoinVertical(lipgloss.Left, m.headerView(), m.searchList.view(m.width, m.overlayHeight()))
 	case overlayApprove:
 		return m.approveView()
 	}

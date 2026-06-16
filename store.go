@@ -20,11 +20,12 @@ const appName = "claude-tui"
 
 // Config is the global user config (config.toml).
 type Config struct {
-	ClaudeBin    string `toml:"claude_bin"`
-	DefaultModel string `toml:"default_model"`
-	DefaultMode  string `toml:"default_mode"`
-	Theme        string `toml:"theme"`
-	LastProject  string `toml:"last_project"`
+	ClaudeBin     string  `toml:"claude_bin"`
+	DefaultModel  string  `toml:"default_model"`
+	DefaultMode   string  `toml:"default_mode"`
+	Theme         string  `toml:"theme"`
+	LastProject   string  `toml:"last_project"`
+	BudgetWarnUSD float64 `toml:"budget_warn_usd"` // 0 = off
 }
 
 // Permissions are the project's remembered allow/deny rules. Deny wins over allow.
@@ -120,7 +121,7 @@ func (s *Store) threadPath(slug, id string) string {
 // ---- config ---------------------------------------------------------------
 
 func defaultConfig() Config {
-	return Config{ClaudeBin: "claude", DefaultMode: "chat", Theme: "default"}
+	return Config{ClaudeBin: "claude", DefaultMode: "chat", Theme: "dark"}
 }
 
 // LoadConfig reads config.toml, returning sane defaults when it is absent.

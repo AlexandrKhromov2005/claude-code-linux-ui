@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"path/filepath"
+	"slices"
 	"strings"
 )
 
@@ -99,10 +100,8 @@ func addAllowRule(p *Project, rule string) bool {
 	if p == nil || rule == "" {
 		return false
 	}
-	for _, existing := range p.Permissions.Allow {
-		if existing == rule {
-			return false
-		}
+	if slices.Contains(p.Permissions.Allow, rule) {
+		return false
 	}
 	p.Permissions.Allow = append(p.Permissions.Allow, rule)
 	return true
