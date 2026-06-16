@@ -1,0 +1,17 @@
+# build artifacts
+/claude-code-linux-ui
+/claude-tui
+*.exe
+*.test
+*.out
+*.prof
+
+# local AI-workflow files (not for the public repo)
+/PROMPT.md
+/CLAUDE.md
+/.claude/
+
+# editor / OS
+.DS_Store
+*.swp
+*~
