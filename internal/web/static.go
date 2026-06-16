@@ -14,6 +14,10 @@ func (s *Server) handleStatic(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, reason, http.StatusForbidden)
 		return
 	}
+	if s.devProxy != nil {
+		s.devProxy.ServeHTTP(w, r)
+		return
+	}
 	if s.assets == nil {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		_, _ = w.Write([]byte(placeholderHTML))

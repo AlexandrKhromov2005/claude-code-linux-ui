@@ -6,6 +6,10 @@
 *.out
 *.prof
 
+# web client build output (sources are committed, build is not)
+/web/node_modules/
+/web/dist/
+
 # local AI-workflow files (not for the public repo)
 /PROMPT.md
 /CLAUDE.md

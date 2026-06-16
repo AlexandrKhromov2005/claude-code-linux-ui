@@ -60,6 +60,12 @@ func runServe(addr string) error {
 
 	srv := web.New(app, webAssets())
 	app.SetBroker(srv)
+	if dev := os.Getenv("CCLU_DEV_SERVER"); dev != "" {
+		if err := srv.SetDevProxy(dev); err != nil {
+			return err
+		}
+		fmt.Fprintln(os.Stderr, "dev: проксирование статики на", dev)
+	}
 	if err := srv.Listen(addr); err != nil {
 		return err
 	}

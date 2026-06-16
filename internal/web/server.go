@@ -8,6 +8,8 @@ import (
 	"io/fs"
 	"net"
 	"net/http"
+	"net/http/httputil"
+	"net/url"
 	"sync"
 	"time"
 
@@ -30,9 +32,21 @@ type Server struct {
 	allow allowlist
 
 	upgrader websocket.Upgrader
+	devProxy *httputil.ReverseProxy // non-nil in dev: proxies static to Vite
 
 	mu         sync.Mutex
 	activeConn *wsConn
+}
+
+// SetDevProxy routes non-API requests to a running Vite dev server (hot
+// reload) instead of the embedded/placeholder assets.
+func (s *Server) SetDevProxy(rawURL string) error {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return err
+	}
+	s.devProxy = httputil.NewSingleHostReverseProxy(u)
+	return nil
 }
 
 // New builds a server over the App. assets may be nil (a placeholder page is

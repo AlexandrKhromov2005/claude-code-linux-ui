@@ -5,9 +5,10 @@ Claude Code CLI in headless mode (`claude -p`). Conversations are grouped into
 projects that share a working directory and context; in agent mode every file
 edit and shell command passes through an approval modal before it runs.
 
-The code is split into a UI-agnostic core (`internal/core`) and thin clients:
-the terminal UI (`internal/tui`) builds on it, and a local web client is planned
-on the same core.
+The code is split into a UI-agnostic core (`internal/core`) and thin clients on
+top of it: a terminal UI (`internal/tui`) and a local web client (`internal/web`
+plus a Svelte frontend in `web/`). The core depends on no UI or transport
+package.
 
 ## Features
 
@@ -37,12 +38,38 @@ on the same core.
 
     go build -o claude-code-linux-ui ./cmd/claude-code-linux-ui
 
+To bundle the web client into the binary, build the frontend first and pass the
+`embed_ui` tag (see "Web client" below).
+
 ## Run
 
     ./claude-code-linux-ui
 
 On first start in a directory that is not yet a project, the project switcher
 offers to use the current folder. Existing projects are reachable with `Ctrl+P`.
+
+## Web client
+
+The same binary can serve a local web UI over the same core:
+
+    ./claude-code-linux-ui serve [addr]    # default 127.0.0.1:8765
+
+It prints a URL with a per-session token in the fragment; open it in a browser.
+The server binds loopback only, authenticates every API request and WebSocket
+upgrade with the token, and enforces a strict Host/Origin allowlist. For remote
+access use an SSH tunnel; do not expose the port.
+
+To embed the built client so `serve` is self-contained:
+
+    cd web && npm install && npm run build && cd ..
+    go build -tags embed_ui -o claude-code-linux-ui ./cmd/claude-code-linux-ui
+
+Without `embed_ui` the server runs and the API works, but `/` shows a
+placeholder. For frontend development with hot reload, run the Vite dev server
+and point the Go server at it:
+
+    cd web && npm run dev          # Vite on :5173
+    CCLU_DEV_SERVER=http://localhost:5173 ./claude-code-linux-ui serve
 
 ## Modes
 
