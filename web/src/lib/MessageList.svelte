@@ -1,6 +1,6 @@
 <script>
   import { onMount, afterUpdate } from 'svelte';
-  import { messages, liveText, streaming } from '../stores/state.js';
+  import { messages, liveText, streaming, liveTool } from '../stores/state.js';
   import { renderMarkdown } from './markdown.js';
 
   let listEl;
@@ -72,6 +72,15 @@
     {/if}
   {/each}
 
+  {#if $streaming}
+    <div class="agent-activity" title="агент выполняет ход">
+      <span class="heartbeat"></span>
+      <span class="activity-text">
+        {#if $liveTool}агент работает · <span class="activity-tool">{$liveTool}</span>{:else}агент думает…{/if}
+      </span>
+    </div>
+  {/if}
+
   {#if $streaming && $liveText}
     <div class="msg msg-assistant">
       <div class="msg-meta">
@@ -82,10 +91,6 @@
         {@html renderMarkdown($liveText)}
         <span class="cursor"></span>
       </div>
-    </div>
-  {:else if $streaming}
-    <div class="msg msg-system">
-      <span class="thinking">...</span>
     </div>
   {/if}
 </div>
@@ -213,6 +218,42 @@
   .thinking {
     letter-spacing: 3px;
     animation: blink 1s step-end infinite;
+  }
+
+  .agent-activity {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 5px 10px;
+    margin: 2px 0;
+    border-radius: var(--radius);
+    background: rgba(106,191,105,0.10);
+    border: 1px solid rgba(106,191,105,0.28);
+    width: fit-content;
+  }
+
+  .activity-text {
+    font-size: 12px;
+    color: var(--green);
+  }
+
+  .activity-tool {
+    font-family: var(--mono);
+    font-weight: 600;
+  }
+
+  .heartbeat {
+    width: 9px;
+    height: 9px;
+    border-radius: 50%;
+    background: var(--green);
+    flex-shrink: 0;
+    animation: heartbeat 1.1s ease-in-out infinite;
+  }
+
+  @keyframes heartbeat {
+    0%, 100% { transform: scale(0.7); opacity: 0.55; }
+    50%      { transform: scale(1.15); opacity: 1; box-shadow: 0 0 6px var(--green); }
   }
 
   /* Markdown output styles */

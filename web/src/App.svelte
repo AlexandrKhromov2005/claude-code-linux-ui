@@ -4,7 +4,7 @@
 
   import { api } from './lib/api.js';
   import { connectWS } from './lib/ws.js';
-  import { appState, messages, streaming, wsConnected, mode, cost } from './stores/state.js';
+  import { appState, messages, streaming, wsConnected, mode, cost, skipPerms } from './stores/state.js';
 
   import Sidebar from './lib/Sidebar.svelte';
   import MessageList from './lib/MessageList.svelte';
@@ -30,6 +30,14 @@
     try {
       const res = await api.setMode(next);
       appState.update(s => s ? { ...s, mode: res.mode } : s);
+      modeWarning = res.warning || '';
+    } catch {}
+  }
+
+  async function toggleSkip() {
+    try {
+      const res = await api.setSkipPerms(!$skipPerms);
+      appState.update(s => s ? { ...s, skipPerms: res.skipPerms } : s);
       modeWarning = res.warning || '';
     } catch {}
   }
@@ -74,6 +82,18 @@
         >
           {$mode === 'agent' ? 'агент' : 'чат'}
         </button>
+
+        <!-- Skip-permissions toggle (agent only) -->
+        {#if $mode === 'agent'}
+          <button
+            class="skip-toggle"
+            class:active={$skipPerms}
+            on:click={toggleSkip}
+            title="Пропуск подтверждений (--dangerously-skip-permissions): агент выполняет правки и команды без запроса. Опасно."
+          >
+            ⚡ skip{$skipPerms ? ' ON' : ''}
+          </button>
+        {/if}
 
         <!-- WS indicator -->
         <span class="ws-dot" class:connected={$wsConnected} title={$wsConnected ? 'подключено' : 'отключено'}></span>
@@ -176,6 +196,24 @@
     background: rgba(217,119,87,0.15);
     color: var(--accent);
     border-color: rgba(217,119,87,0.4);
+  }
+
+  .skip-toggle {
+    font-size: 12px;
+    padding: 3px 9px;
+    background: var(--bg3);
+    color: var(--text-dim);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    letter-spacing: 0.02em;
+    transition: all 0.15s;
+  }
+  .skip-toggle:hover { border-color: var(--red); color: var(--text); }
+  .skip-toggle.active {
+    background: rgba(224,92,92,0.18);
+    color: var(--red);
+    border-color: rgba(224,92,92,0.5);
+    font-weight: 600;
   }
 
   .ws-dot {

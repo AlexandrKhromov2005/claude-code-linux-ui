@@ -108,7 +108,7 @@ func TestHandleApprovalNoBrokerDenies(t *testing.T) {
 
 func TestHandleApprovalRemembersRule(t *testing.T) {
 	app := newTestApp(t)
-	if _, err := app.UseCwd("/tmp/appr-proj"); err != nil {
+	if _, err := app.UseCwd(t.TempDir()); err != nil {
 		t.Fatalf("UseCwd: %v", err)
 	}
 	app.SetBroker(stubBroker{dec: ApprovalDecision{Allow: true, RememberRule: "Bash(go test:*)"}})
@@ -143,7 +143,7 @@ func TestHandleApprovalRemembersRule(t *testing.T) {
 
 func TestSetModeWarnsWithoutPermission(t *testing.T) {
 	app := newTestApp(t)
-	if _, err := app.UseCwd("/tmp/mode-proj"); err != nil {
+	if _, err := app.UseCwd(t.TempDir()); err != nil {
 		t.Fatal(err)
 	}
 	if warn := app.SetMode(ModeAgent); warn == "" {

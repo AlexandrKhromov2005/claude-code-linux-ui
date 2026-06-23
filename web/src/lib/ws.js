@@ -1,6 +1,6 @@
 import { api } from './api.js';
 import {
-  appState, messages, streaming, liveText,
+  appState, messages, streaming, liveText, liveTool,
   pendingApproval, wsConnected,
 } from '../stores/state.js';
 import { get } from 'svelte/store';
@@ -62,6 +62,7 @@ function handleMessage(msg) {
         ]);
         liveText.set('');
       }
+      liveTool.set('');
       streaming.set(false);
       break;
 
@@ -74,6 +75,7 @@ function handleMessage(msg) {
         ...ms,
         { role: 'system', content: `Ошибка: ${msg.message}`, ts: new Date().toISOString() },
       ]);
+      liveTool.set('');
       streaming.set(false);
       break;
   }
@@ -87,6 +89,8 @@ function handleEvent(msg) {
       break;
 
     case 'tool_start':
+      streaming.set(true);
+      liveTool.set(msg.tool || 'tool');
       messages.update(ms => [
         ...ms,
         { role: 'tool', content: msg.tool || '', ts: new Date().toISOString(), _transient: true },
@@ -103,6 +107,7 @@ function handleEvent(msg) {
       break;
 
     case 'result':
+      liveTool.set('');
       appState.update(s => s ? { ...s, cost: msg.cost ?? s.cost } : s);
       break;
 
@@ -125,6 +130,7 @@ function handleEvent(msg) {
         ...ms,
         { role: 'system', content: `Ошибка: ${msg.error || ''}`, ts: new Date().toISOString(), _error: true },
       ]);
+      liveTool.set('');
       streaming.set(false);
       break;
   }
@@ -133,6 +139,7 @@ function handleEvent(msg) {
 export function sendMessage(text, attachmentPaths) {
   streaming.set(true);
   liveText.set('');
+  liveTool.set('');
   // Add user message to local list immediately
   messages.update(ms => [
     ...ms,
@@ -145,6 +152,7 @@ export function cancelTurn() {
   sendFn?.({ type: 'cancel' });
   streaming.set(false);
   liveText.set('');
+  liveTool.set('');
 }
 
 export function sendApproval(id, allow, rememberRule) {

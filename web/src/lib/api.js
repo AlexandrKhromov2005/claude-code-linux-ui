@@ -37,7 +37,7 @@ export const api = {
   getState: () => get('/api/state'),
   getProjects: () => get('/api/projects'),
   openProject: (slug) => post('/api/projects/open', { slug }),
-  useProject: (cwd) => post('/api/projects/use', { cwd }),
+  useProject: (cwd, mode) => post('/api/projects/use', mode ? { cwd, mode } : { cwd }),
 
   getThreads: () => get('/api/threads'),
   openThread: (id) => post('/api/threads/open', { id }),
@@ -47,6 +47,7 @@ export const api = {
   search: (q) => get(`/api/search?q=${encodeURIComponent(q)}`),
 
   setMode: (mode) => post('/api/mode', { mode }),
+  setSkipPerms: (skip) => post('/api/permissions/skip', { skip }),
   getMemory: () => get('/api/memory'),
   setMemory: (content) => post('/api/memory', { content }),
   setTheme: (name) => post('/api/theme', { name }),

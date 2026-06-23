@@ -9,6 +9,9 @@
   let searchResults = [];
   let searchDebounce;
   let projectsOpen = false;
+  let newCwd = '';
+  let connectError = '';
+  let connecting = false;
 
   onMount(async () => {
     await loadProjects();
@@ -37,6 +40,25 @@
       await loadThreads();
     } catch (err) {
       console.error(err);
+    }
+  }
+
+  async function connectDir() {
+    const cwd = newCwd.trim();
+    if (!cwd || connecting) return;
+    connecting = true;
+    connectError = '';
+    try {
+      const state = await api.useProject(cwd, 'agent');
+      appState.set(state);
+      newCwd = '';
+      projectsOpen = false;
+      await loadProjects();
+      await loadThreads();
+    } catch (err) {
+      connectError = String(err?.message || err);
+    } finally {
+      connecting = false;
     }
   }
 
@@ -130,6 +152,26 @@
         {#if projects.length === 0}
           <span class="empty-hint">Проектов нет</span>
         {/if}
+
+        <div class="connect-dir">
+          <span class="connect-label">Подключить директорию</span>
+          <div class="connect-row">
+            <input
+              type="text"
+              placeholder="/путь/к/проекту или ~/dir"
+              bind:value={newCwd}
+              on:keydown={(e) => e.key === 'Enter' && connectDir()}
+            />
+            <button class="connect-btn" on:click={connectDir} disabled={connecting || !newCwd.trim()}>
+              {connecting ? '…' : 'OK'}
+            </button>
+          </div>
+          {#if connectError}
+            <span class="connect-error">{connectError}</span>
+          {:else}
+            <span class="connect-note">откроется в режиме агента (правки — через подтверждение)</span>
+          {/if}
+        </div>
       </div>
     {/if}
   </div>
@@ -262,6 +304,42 @@
 
   .p-name { font-weight: 500; }
   .p-cwd  { font-size: 11px; color: var(--text-dim); font-family: var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; width: 100%; }
+
+  .connect-dir {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+    padding: 8px 14px 10px;
+    border-top: 1px solid var(--border);
+  }
+  .connect-label {
+    font-size: 10px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--text-dim);
+  }
+  .connect-row { display: flex; gap: 6px; }
+  .connect-row input {
+    flex: 1;
+    min-width: 0;
+    font-size: 12px;
+    padding: 5px 8px;
+    font-family: var(--mono);
+  }
+  .connect-btn {
+    flex-shrink: 0;
+    background: var(--bg3);
+    color: var(--accent);
+    border: 1px solid rgba(217,119,87,0.35);
+    border-radius: var(--radius);
+    font-size: 12px;
+    padding: 0 10px;
+  }
+  .connect-btn:hover:not(:disabled) { background: rgba(217,119,87,0.12); }
+  .connect-btn:disabled { opacity: 0.5; cursor: default; }
+  .connect-error { font-size: 11px; color: var(--red); word-break: break-word; }
+  .connect-note { font-size: 10px; color: var(--text-dim); font-style: italic; }
 
   .search-box {
     padding: 8px 10px;

@@ -30,6 +30,24 @@ func ExpandPath(p string) string {
 	return p
 }
 
+// ExpandDir expands ~ and makes the path absolute, requiring it to point at an
+// existing directory. It returns the cleaned absolute path or an error a client
+// can surface.
+func ExpandDir(p string) (string, error) {
+	if strings.TrimSpace(p) == "" {
+		return "", fmt.Errorf("путь не указан")
+	}
+	p = ExpandPath(p)
+	info, err := os.Stat(p)
+	if err != nil {
+		return "", fmt.Errorf("папка не найдена: %s", p)
+	}
+	if !info.IsDir() {
+		return "", fmt.Errorf("это файл, не директория: %s", p)
+	}
+	return p, nil
+}
+
 // ValidateAttachmentPath expands and checks an attachment path, returning the
 // cleaned absolute path or an error a client can surface.
 func ValidateAttachmentPath(p string) (string, error) {

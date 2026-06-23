@@ -76,6 +76,10 @@ type Engine struct {
 	PermPromptTool string // e.g. mcp__permctl__approve
 	MCPConfig      string // inline JSON for --mcp-config
 	SettingsJSON   string // inline JSON for --settings (allow/deny rules)
+
+	// SkipPermissions runs agent mode with --dangerously-skip-permissions: every
+	// tool is auto-allowed with no approval prompt. Opt-in and dangerous.
+	SkipPermissions bool
 }
 
 // rawEvent is a permissive view of one NDJSON line from --output-format stream-json.
@@ -222,6 +226,9 @@ func (e *Engine) Send(ctx context.Context, prompt, resumeID string) <-chan Event
 func (e *Engine) modeArgs() []string {
 	switch e.Mode {
 	case ModeAgent:
+		if e.SkipPermissions {
+			return []string{"--dangerously-skip-permissions"}
+		}
 		args := []string{"--permission-mode", "default"}
 		if e.PermPromptTool != "" {
 			args = append(args, "--permission-prompt-tool", e.PermPromptTool)

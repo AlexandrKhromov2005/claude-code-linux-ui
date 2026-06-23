@@ -28,6 +28,10 @@ type App struct {
 	thread  *Thread
 	mode    Mode
 
+	// skipPerms enables --dangerously-skip-permissions in agent mode for this
+	// session: tools run with no approval prompt. Off by default, never persisted.
+	skipPerms bool
+
 	cost         float64
 	budgetWarned bool
 }
@@ -83,6 +87,13 @@ func (a *App) Mode() Mode {
 	return a.mode
 }
 
+// SkipPermissions reports whether agent turns bypass the approval prompt.
+func (a *App) SkipPermissions() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.skipPerms
+}
+
 // Cost returns the accumulated session cost in USD.
 func (a *App) Cost() float64 {
 	a.mu.Lock()
@@ -130,11 +141,17 @@ func (a *App) configureEngineLocked() {
 	a.engine.PermPromptTool = ""
 	a.engine.MCPConfig = ""
 	a.engine.SettingsJSON = ""
+	a.engine.SkipPermissions = false
 	if a.mode == ModeAgent {
-		a.engine.SettingsJSON = settingsJSON(a.project)
-		if a.perm != nil && a.perm.Addr() != "" {
-			a.engine.PermPromptTool = a.perm.PromptTool()
-			a.engine.MCPConfig = a.perm.MCPConfigJSON()
+		if a.skipPerms {
+			// Bypass the approval broker entirely; nothing else is wired.
+			a.engine.SkipPermissions = true
+		} else {
+			a.engine.SettingsJSON = settingsJSON(a.project)
+			if a.perm != nil && a.perm.Addr() != "" {
+				a.engine.PermPromptTool = a.perm.PromptTool()
+				a.engine.MCPConfig = a.perm.MCPConfigJSON()
+			}
 		}
 	}
 }
@@ -184,8 +201,13 @@ func (a *App) OpenProjectObj(p *Project) {
 	a.openLocked(p)
 }
 
-// UseCwd opens (creating if needed) the project rooted at cwd.
+// UseCwd opens (creating if needed) the project rooted at cwd. The path is
+// expanded and validated as an existing directory first.
 func (a *App) UseCwd(cwd string) (*Project, error) {
+	cwd, err := ExpandDir(cwd)
+	if err != nil {
+		return nil, err
+	}
 	p, err := a.store.ProjectForCwd(cwd)
 	if err == nil && p == nil {
 		p, err = a.store.CreateProject("", cwd)
@@ -284,6 +306,20 @@ func (a *App) SetMode(mode Mode) string {
 	a.configureEngineLocked()
 	if mode == ModeAgent && (a.perm == nil || a.perm.Addr() == "") {
 		return "approval-сервер недоступен: мутации будут отклонены"
+	}
+	return ""
+}
+
+// SetSkipPermissions toggles --dangerously-skip-permissions for agent turns and
+// rewires the engine. It returns a non-empty warning when enabling it, since it
+// removes the approval prompt for every tool.
+func (a *App) SetSkipPermissions(v bool) string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.skipPerms = v
+	a.configureEngineLocked()
+	if v {
+		return "пропуск подтверждений включён: агент выполняет правки и команды без запроса"
 	}
 	return ""
 }

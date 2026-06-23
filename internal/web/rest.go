@@ -22,6 +22,7 @@ func (s *Server) registerAPI(mux *http.ServeMux) {
 	mux.HandleFunc("/api/threads/delete", s.guard(s.handleThreadDelete))
 	mux.HandleFunc("/api/search", s.guard(s.handleSearch))
 	mux.HandleFunc("/api/mode", s.guard(s.handleMode))
+	mux.HandleFunc("/api/permissions/skip", s.guard(s.handleSkipPerms))
 	mux.HandleFunc("/api/memory", s.guard(s.handleMemory))
 	mux.HandleFunc("/api/theme", s.guard(s.handleTheme))
 	mux.HandleFunc("/api/budget", s.guard(s.handleBudget))
@@ -48,13 +49,14 @@ type threadSummaryDTO struct {
 }
 
 type stateDTO struct {
-	Project *projectDTO       `json:"project"`
-	Thread  *threadSummaryDTO `json:"thread"`
-	Mode    string            `json:"mode"`
-	Cost    float64           `json:"cost"`
-	Theme   string            `json:"theme"`
-	Budget  float64           `json:"budget"`
-	Perm    struct {
+	Project   *projectDTO       `json:"project"`
+	Thread    *threadSummaryDTO `json:"thread"`
+	Mode      string            `json:"mode"`
+	SkipPerms bool              `json:"skipPerms"`
+	Cost      float64           `json:"cost"`
+	Theme     string            `json:"theme"`
+	Budget    float64           `json:"budget"`
+	Perm      struct {
 		OK   bool   `json:"ok"`
 		Addr string `json:"addr"`
 	} `json:"perm"`
@@ -79,6 +81,7 @@ func (s *Server) state() stateDTO {
 	d.Project = projectToDTO(s.app.CurrentProject())
 	d.Thread = threadSummary(s.app.CurrentThread())
 	d.Mode = s.app.Mode().String()
+	d.SkipPerms = s.app.SkipPermissions()
 	d.Cost = s.app.Cost()
 	cfg := s.app.Config()
 	d.Theme = cfg.Theme
@@ -140,7 +143,8 @@ func (s *Server) handleProjectOpen(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleProjectUse(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		Cwd string `json:"cwd"`
+		Cwd  string `json:"cwd"`
+		Mode string `json:"mode"` // optional: open the connected folder in this mode
 	}
 	if err := readJSON(r, &body); err != nil || body.Cwd == "" {
 		badRequest(w, "cwd required")
@@ -149,6 +153,11 @@ func (s *Server) handleProjectUse(w http.ResponseWriter, r *http.Request) {
 	if _, err := s.app.UseCwd(body.Cwd); err != nil {
 		badRequest(w, err.Error())
 		return
+	}
+	// The web client opts folders into agent mode on connect so they are not
+	// read-only; chat stays the safe default for everything else.
+	if body.Mode != "" {
+		s.app.SetMode(core.ParseMode(body.Mode))
 	}
 	writeJSON(w, http.StatusOK, s.state())
 }
@@ -226,6 +235,18 @@ func (s *Server) handleMode(w http.ResponseWriter, r *http.Request) {
 	}
 	warn := s.app.SetMode(core.ParseMode(body.Mode))
 	writeJSON(w, http.StatusOK, map[string]string{"warning": warn, "mode": s.app.Mode().String()})
+}
+
+func (s *Server) handleSkipPerms(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Skip bool `json:"skip"`
+	}
+	if err := readJSON(r, &body); err != nil {
+		badRequest(w, "skip required")
+		return
+	}
+	warn := s.app.SetSkipPermissions(body.Skip)
+	writeJSON(w, http.StatusOK, map[string]any{"warning": warn, "skipPerms": s.app.SkipPermissions()})
 }
 
 func (s *Server) handleMemory(w http.ResponseWriter, r *http.Request) {

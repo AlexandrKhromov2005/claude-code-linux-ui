@@ -3,6 +3,7 @@ package core
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -19,6 +20,23 @@ func TestParseMode(t *testing.T) {
 	}
 	if ModeAgent.String() != "agent" || ModeChat.String() != "chat" {
 		t.Errorf("Mode.String mismatch")
+	}
+}
+
+func TestModeArgs(t *testing.T) {
+	chat := (&Engine{Mode: ModeChat}).modeArgs()
+	if !slices.Contains(chat, "--allowedTools") || !slices.Contains(chat, chatTools) || !slices.Contains(chat, "dontAsk") {
+		t.Errorf("chat args = %v", chat)
+	}
+
+	agent := (&Engine{Mode: ModeAgent, PermPromptTool: "mcp__permctl__approve"}).modeArgs()
+	if !slices.Contains(agent, "--permission-prompt-tool") || slices.Contains(agent, "--dangerously-skip-permissions") {
+		t.Errorf("agent args = %v", agent)
+	}
+
+	skip := (&Engine{Mode: ModeAgent, SkipPermissions: true, PermPromptTool: "mcp__permctl__approve"}).modeArgs()
+	if !slices.Contains(skip, "--dangerously-skip-permissions") || slices.Contains(skip, "--permission-prompt-tool") {
+		t.Errorf("skip args = %v", skip)
 	}
 }
 
