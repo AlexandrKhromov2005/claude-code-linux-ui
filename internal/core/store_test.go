@@ -35,6 +35,7 @@ func TestConfigRoundTrip(t *testing.T) {
 	cfg.LastProject = "demo"
 	cfg.Theme = "dark"
 	cfg.BudgetWarnUSD = 2.5
+	cfg.SkipPerms = true
 	if err := s.SaveConfig(cfg); err != nil {
 		t.Fatalf("SaveConfig: %v", err)
 	}

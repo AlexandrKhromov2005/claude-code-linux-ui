@@ -246,7 +246,11 @@ func (s *Server) handleSkipPerms(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	warn := s.app.SetSkipPermissions(body.Skip)
-	writeJSON(w, http.StatusOK, map[string]any{"warning": warn, "skipPerms": s.app.SkipPermissions()})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"warning":   warn,
+		"skipPerms": s.app.SkipPermissions(),
+		"mode":      s.app.Mode().String(),
+	})
 }
 
 func (s *Server) handleMemory(w http.ResponseWriter, r *http.Request) {

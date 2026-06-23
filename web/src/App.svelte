@@ -37,7 +37,7 @@
   async function toggleSkip() {
     try {
       const res = await api.setSkipPerms(!$skipPerms);
-      appState.update(s => s ? { ...s, skipPerms: res.skipPerms } : s);
+      appState.update(s => s ? { ...s, skipPerms: res.skipPerms, mode: res.mode ?? s.mode } : s);
       modeWarning = res.warning || '';
     } catch {}
   }
@@ -83,17 +83,15 @@
           {$mode === 'agent' ? 'агент' : 'чат'}
         </button>
 
-        <!-- Skip-permissions toggle (agent only) -->
-        {#if $mode === 'agent'}
-          <button
-            class="skip-toggle"
-            class:active={$skipPerms}
-            on:click={toggleSkip}
-            title="Пропуск подтверждений (--dangerously-skip-permissions): агент выполняет правки и команды без запроса. Опасно."
-          >
-            ⚡ skip{$skipPerms ? ' ON' : ''}
-          </button>
-        {/if}
+        <!-- Skip-permissions toggle: one switch for "act without asking" -->
+        <button
+          class="skip-toggle"
+          class:active={$skipPerms}
+          on:click={toggleSkip}
+          title="Без подтверждений (--dangerously-skip-permissions): агент выполняет правки и команды без запроса. Сохраняется между сессиями. Опасно."
+        >
+          {$skipPerms ? '⚡ без подтверждений' : '🔒 спрашивать'}
+        </button>
 
         <!-- WS indicator -->
         <span class="ws-dot" class:connected={$wsConnected} title={$wsConnected ? 'подключено' : 'отключено'}></span>

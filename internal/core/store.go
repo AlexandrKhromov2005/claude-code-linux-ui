@@ -28,7 +28,8 @@ type Config struct {
 	DefaultMode   string  `toml:"default_mode"`
 	Theme         string  `toml:"theme"`
 	LastProject   string  `toml:"last_project"`
-	BudgetWarnUSD float64 `toml:"budget_warn_usd"` // 0 = off
+	BudgetWarnUSD float64 `toml:"budget_warn_usd"`  // 0 = off
+	SkipPerms     bool    `toml:"skip_permissions"` // agent runs with --dangerously-skip-permissions
 }
 
 // Permissions are the project's remembered allow/deny rules. Deny wins over allow.

@@ -38,7 +38,7 @@ type App struct {
 
 // NewApp builds an App over a store, config and engine.
 func NewApp(store *Store, cfg Config, engine *Engine) *App {
-	return &App{store: store, cfg: cfg, engine: engine, mode: ParseMode(cfg.DefaultMode)}
+	return &App{store: store, cfg: cfg, engine: engine, mode: ParseMode(cfg.DefaultMode), skipPerms: cfg.SkipPerms}
 }
 
 // SetPermission attaches the approval transport used in agent mode.
@@ -317,9 +317,20 @@ func (a *App) SetSkipPermissions(v bool) string {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.skipPerms = v
+	a.cfg.SkipPerms = v
+	_ = a.store.SaveConfig(a.cfg)
+	if v {
+		// Skip only has meaning in agent mode (chat is read-only), so enabling
+		// it engages agent mode too: one switch = "act without asking".
+		a.mode = ModeAgent
+		if a.project != nil {
+			a.project.Mode = a.mode.String()
+			_ = a.store.SaveProject(a.project)
+		}
+	}
 	a.configureEngineLocked()
 	if v {
-		return "пропуск подтверждений включён: агент выполняет правки и команды без запроса"
+		return "пропуск подтверждений включён (сохранено): агент выполняет правки и команды без запроса"
 	}
 	return ""
 }
