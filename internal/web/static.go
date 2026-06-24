@@ -34,6 +34,9 @@ const placeholderHTML = `<!doctype html>
 <p>Соберите фронтенд (web/) и пересоберите с встроенными ассетами.</p>
 </body>`
 
+// errFileTooLarge is returned by copyLimited when the source exceeds the cap.
+var errFileTooLarge = errors.New("файл слишком большой")
+
 // copyLimited copies at most max bytes, erroring if the source is larger.
 func copyLimited(dst io.Writer, src io.Reader, max int64) (int64, error) {
 	n, err := io.Copy(dst, io.LimitReader(src, max+1))
@@ -41,7 +44,7 @@ func copyLimited(dst io.Writer, src io.Reader, max int64) (int64, error) {
 		return n, err
 	}
 	if n > max {
-		return max, errors.New("файл слишком большой")
+		return max, errFileTooLarge
 	}
 	return n, nil
 }

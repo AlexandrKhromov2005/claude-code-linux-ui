@@ -2,6 +2,8 @@ package web
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -10,6 +12,10 @@ import (
 
 	"github.com/AlexandrKhromov2005/claude-code-linux-ui/internal/core"
 )
+
+// maxUploadBytes caps a single attachment upload. Generous for a local,
+// single-user tool (archives, datasets); the part still streams to disk.
+const maxUploadBytes = 1 << 30 // 1 GiB
 
 func (s *Server) registerAPI(mux *http.ServeMux) {
 	mux.HandleFunc("/api/state", s.guard(s.handleState))
@@ -377,9 +383,14 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 		badRequest(w, err.Error())
 		return
 	}
-	if _, err := copyLimited(out, file, 64<<20); err != nil {
+	if _, err := copyLimited(out, file, maxUploadBytes); err != nil {
 		out.Close()
-		badRequest(w, err.Error())
+		os.Remove(dst)
+		if errors.Is(err, errFileTooLarge) {
+			badRequest(w, fmt.Sprintf("файл слишком большой (макс %d МБ)", maxUploadBytes>>20))
+		} else {
+			badRequest(w, err.Error())
+		}
 		return
 	}
 	out.Close()
