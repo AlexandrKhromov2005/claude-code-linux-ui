@@ -126,7 +126,13 @@ func (c *wsConn) startTurn(text string, attachments []string) {
 	}
 	go func() {
 		for ev := range ch {
-			_ = c.writeJSON(eventToMsg(ev))
+			m := eventToMsg(ev)
+			// The result event carries this turn's cost; the client shows the
+			// running session total, so report the accumulated value instead.
+			if ev.Kind == core.EvResult {
+				m["cost"] = c.s.app.Cost()
+			}
+			_ = c.writeJSON(m)
 		}
 		_ = c.writeJSON(map[string]any{"type": "turn_end"})
 		cancel()
