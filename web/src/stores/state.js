@@ -15,4 +15,5 @@ export const currentProject = derived(appState, $s => $s?.project ?? null);
 export const currentThread = derived(appState, $s => $s?.thread ?? null);
 export const mode = derived(appState, $s => $s?.mode ?? 'chat');
 export const skipPerms = derived(appState, $s => $s?.skipPerms ?? false);
+export const effort = derived(appState, $s => $s?.effort ?? '');
 export const cost = derived(appState, $s => $s?.cost ?? 0);

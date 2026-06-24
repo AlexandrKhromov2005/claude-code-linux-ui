@@ -48,6 +48,7 @@ export const api = {
 
   setMode: (mode) => post('/api/mode', { mode }),
   setSkipPerms: (skip) => post('/api/permissions/skip', { skip }),
+  setEffort: (effort) => post('/api/effort', { effort }),
   getMemory: () => get('/api/memory'),
   setMemory: (content) => post('/api/memory', { content }),
   setTheme: (name) => post('/api/theme', { name }),

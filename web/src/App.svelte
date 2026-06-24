@@ -4,7 +4,7 @@
 
   import { api } from './lib/api.js';
   import { connectWS } from './lib/ws.js';
-  import { appState, messages, streaming, wsConnected, mode, cost, skipPerms } from './stores/state.js';
+  import { appState, messages, streaming, wsConnected, mode, cost, skipPerms, effort } from './stores/state.js';
 
   import Sidebar from './lib/Sidebar.svelte';
   import MessageList from './lib/MessageList.svelte';
@@ -14,6 +14,21 @@
 
   let settingsOpen = false;
   let modeWarning = '';
+
+  const effortLevels = ['', 'low', 'medium', 'high', 'xhigh', 'max'];
+  let effortSel = '';
+  $: effortSel = $effort || '';
+
+  async function pickEffort() {
+    try {
+      const res = await api.setEffort(effortSel);
+      appState.update(s => s ? { ...s, effort: res.effort } : s);
+    } catch {}
+  }
+
+  function effortLabel(v) {
+    return v === '' ? 'авто' : v;
+  }
 
   onMount(async () => {
     try {
@@ -72,6 +87,18 @@
 
       <div class="topbar-right">
         <span class="meta-item cost" class:positive={$cost > 0}>{formatCost($cost)}</span>
+
+        <!-- Effort level -->
+        <select
+          class="effort-select"
+          bind:value={effortSel}
+          on:change={pickEffort}
+          title="Уровень reasoning effort (--effort). «авто» — дефолт модели."
+        >
+          {#each effortLevels as lvl}
+            <option value={lvl}>effort: {effortLabel(lvl)}</option>
+          {/each}
+        </select>
 
         <!-- Mode toggle -->
         <button
@@ -177,6 +204,19 @@
     color: var(--text-dim);
   }
   .cost.positive { color: var(--accent); }
+
+  .effort-select {
+    font-size: 12px;
+    padding: 3px 6px;
+    background: var(--bg3);
+    color: var(--text-dim);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    cursor: pointer;
+    max-width: 130px;
+  }
+  .effort-select:hover { border-color: var(--text-dim); color: var(--text); }
+  .effort-select:focus { outline: none; border-color: var(--accent); }
 
   .mode-toggle {
     font-size: 12px;

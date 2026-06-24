@@ -30,6 +30,7 @@ type Config struct {
 	LastProject   string  `toml:"last_project"`
 	BudgetWarnUSD float64 `toml:"budget_warn_usd"`  // 0 = off
 	SkipPerms     bool    `toml:"skip_permissions"` // agent runs with --dangerously-skip-permissions
+	Effort        string  `toml:"effort"`           // reasoning effort level ("" = model default)
 }
 
 // Permissions are the project's remembered allow/deny rules. Deny wins over allow.

@@ -32,13 +32,17 @@ type App struct {
 	// session: tools run with no approval prompt. Off by default, never persisted.
 	skipPerms bool
 
+	// effort is the reasoning-effort level passed via --effort ("" = model
+	// default). Persisted in config.
+	effort string
+
 	cost         float64
 	budgetWarned bool
 }
 
 // NewApp builds an App over a store, config and engine.
 func NewApp(store *Store, cfg Config, engine *Engine) *App {
-	return &App{store: store, cfg: cfg, engine: engine, mode: ParseMode(cfg.DefaultMode), skipPerms: cfg.SkipPerms}
+	return &App{store: store, cfg: cfg, engine: engine, mode: ParseMode(cfg.DefaultMode), skipPerms: cfg.SkipPerms, effort: cfg.Effort}
 }
 
 // SetPermission attaches the approval transport used in agent mode.
@@ -94,6 +98,28 @@ func (a *App) SkipPermissions() bool {
 	return a.skipPerms
 }
 
+// Effort returns the current reasoning-effort level ("" = model default).
+func (a *App) Effort() string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.effort
+}
+
+// SetEffort persists the reasoning-effort level and rewires the engine. An empty
+// level restores the model default. It errors on an unknown level.
+func (a *App) SetEffort(level string) error {
+	if !ValidEffort(level) {
+		return fmt.Errorf("недопустимый effort: %q", level)
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.effort = level
+	a.cfg.Effort = level
+	_ = a.store.SaveConfig(a.cfg)
+	a.configureEngineLocked()
+	return nil
+}
+
 // Cost returns the accumulated session cost in USD.
 func (a *App) Cost() float64 {
 	a.mu.Lock()
@@ -132,6 +158,7 @@ func (a *App) configureEngineLocked() {
 	a.engine.Cwd = a.project.Cwd
 	a.engine.MemoryFile = a.store.MemoryPath(a.project.Slug())
 	a.engine.Mode = a.mode
+	a.engine.Effort = a.effort
 	if a.project.Model != "" {
 		a.engine.Model = a.project.Model
 	} else {

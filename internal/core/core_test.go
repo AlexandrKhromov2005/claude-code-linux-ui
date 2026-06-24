@@ -40,6 +40,19 @@ func TestModeArgs(t *testing.T) {
 	}
 }
 
+func TestValidEffort(t *testing.T) {
+	for _, ok := range []string{"", "low", "medium", "high", "xhigh", "max"} {
+		if !ValidEffort(ok) {
+			t.Errorf("ValidEffort(%q) = false, want true", ok)
+		}
+	}
+	for _, bad := range []string{"lowest", "HIGH", "ultra", "auto", "1"} {
+		if ValidEffort(bad) {
+			t.Errorf("ValidEffort(%q) = true, want false", bad)
+		}
+	}
+}
+
 func TestMakeTitle(t *testing.T) {
 	if got := makeTitle("  hello world  "); got != "hello world" {
 		t.Errorf("trim: %q", got)

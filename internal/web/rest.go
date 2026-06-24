@@ -23,6 +23,7 @@ func (s *Server) registerAPI(mux *http.ServeMux) {
 	mux.HandleFunc("/api/search", s.guard(s.handleSearch))
 	mux.HandleFunc("/api/mode", s.guard(s.handleMode))
 	mux.HandleFunc("/api/permissions/skip", s.guard(s.handleSkipPerms))
+	mux.HandleFunc("/api/effort", s.guard(s.handleEffort))
 	mux.HandleFunc("/api/memory", s.guard(s.handleMemory))
 	mux.HandleFunc("/api/theme", s.guard(s.handleTheme))
 	mux.HandleFunc("/api/budget", s.guard(s.handleBudget))
@@ -53,6 +54,7 @@ type stateDTO struct {
 	Thread    *threadSummaryDTO `json:"thread"`
 	Mode      string            `json:"mode"`
 	SkipPerms bool              `json:"skipPerms"`
+	Effort    string            `json:"effort"`
 	Cost      float64           `json:"cost"`
 	Theme     string            `json:"theme"`
 	Budget    float64           `json:"budget"`
@@ -82,6 +84,7 @@ func (s *Server) state() stateDTO {
 	d.Thread = threadSummary(s.app.CurrentThread())
 	d.Mode = s.app.Mode().String()
 	d.SkipPerms = s.app.SkipPermissions()
+	d.Effort = s.app.Effort()
 	d.Cost = s.app.Cost()
 	cfg := s.app.Config()
 	d.Theme = cfg.Theme
@@ -251,6 +254,21 @@ func (s *Server) handleSkipPerms(w http.ResponseWriter, r *http.Request) {
 		"skipPerms": s.app.SkipPermissions(),
 		"mode":      s.app.Mode().String(),
 	})
+}
+
+func (s *Server) handleEffort(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Effort string `json:"effort"`
+	}
+	if err := readJSON(r, &body); err != nil {
+		badRequest(w, "effort required")
+		return
+	}
+	if err := s.app.SetEffort(body.Effort); err != nil {
+		badRequest(w, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"effort": s.app.Effort()})
 }
 
 func (s *Server) handleMemory(w http.ResponseWriter, r *http.Request) {

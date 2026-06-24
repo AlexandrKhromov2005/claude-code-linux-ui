@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"slices"
 	"strings"
 )
 
@@ -35,6 +36,15 @@ func ParseMode(s string) Mode {
 
 // chatTools is the read-only allowlist for chat mode.
 const chatTools = "Read,Grep,Glob"
+
+// EffortLevels are the reasoning-effort levels accepted by --effort. An empty
+// effort means "model default" (the flag is omitted).
+var EffortLevels = []string{"low", "medium", "high", "xhigh", "max"}
+
+// ValidEffort reports whether s is an accepted effort level ("" = model default).
+func ValidEffort(s string) bool {
+	return s == "" || slices.Contains(EffortLevels, s)
+}
 
 // EventKind classifies streamed events coming out of the claude CLI.
 type EventKind int
@@ -71,6 +81,7 @@ type Engine struct {
 	Cwd        string // process working directory (project root)
 	MemoryFile string // --append-system-prompt-file path ("" = none)
 	Mode       Mode
+	Effort     string // optional --effort level ("" = model default)
 
 	// Agent-mode wiring, supplied by the permission service.
 	PermPromptTool string // e.g. mcp__permctl__approve
@@ -125,6 +136,9 @@ func (e *Engine) Send(ctx context.Context, prompt, resumeID string) <-chan Event
 	}
 	if e.Model != "" {
 		args = append(args, "--model", e.Model)
+	}
+	if e.Effort != "" {
+		args = append(args, "--effort", e.Effort)
 	}
 	if e.MemoryFile != "" {
 		if _, err := os.Stat(e.MemoryFile); err == nil {
