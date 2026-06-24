@@ -108,7 +108,7 @@ func (a *App) Effort() string {
 // SetEffort persists the reasoning-effort level and rewires the engine. An empty
 // level restores the model default. It errors on an unknown level.
 func (a *App) SetEffort(level string) error {
-	if !ValidEffort(level) {
+	if !ValidEffortChoice(level) {
 		return fmt.Errorf("недопустимый effort: %q", level)
 	}
 	a.mu.Lock()
@@ -158,7 +158,12 @@ func (a *App) configureEngineLocked() {
 	a.engine.Cwd = a.project.Cwd
 	a.engine.MemoryFile = a.store.MemoryPath(a.project.Slug())
 	a.engine.Mode = a.mode
-	a.engine.Effort = a.effort
+	// "ultracode" is not an --effort value; it travels via --settings below.
+	if a.effort == "ultracode" {
+		a.engine.Effort = ""
+	} else {
+		a.engine.Effort = a.effort
+	}
 	if a.project.Model != "" {
 		a.engine.Model = a.project.Model
 	} else {
@@ -167,20 +172,23 @@ func (a *App) configureEngineLocked() {
 
 	a.engine.PermPromptTool = ""
 	a.engine.MCPConfig = ""
-	a.engine.SettingsJSON = ""
 	a.engine.SkipPermissions = false
+	withPerms := false
 	if a.mode == ModeAgent {
 		if a.skipPerms {
 			// Bypass the approval broker entirely; nothing else is wired.
 			a.engine.SkipPermissions = true
 		} else {
-			a.engine.SettingsJSON = settingsJSON(a.project)
+			withPerms = true
 			if a.perm != nil && a.perm.Addr() != "" {
 				a.engine.PermPromptTool = a.perm.PromptTool()
 				a.engine.MCPConfig = a.perm.MCPConfigJSON()
 			}
 		}
 	}
+	// Settings carry allow/deny rules (agent mode) and the ultracode flag (any
+	// mode); omitted entirely when neither applies.
+	a.engine.SettingsJSON = buildSettings(a.project, withPerms, a.effort == "ultracode")
 }
 
 // ---- projects / threads ---------------------------------------------------

@@ -41,9 +41,16 @@ const chatTools = "Read,Grep,Glob"
 // effort means "model default" (the flag is omitted).
 var EffortLevels = []string{"low", "medium", "high", "xhigh", "max"}
 
-// ValidEffort reports whether s is an accepted effort level ("" = model default).
+// ValidEffort reports whether s is an accepted --effort level ("" = model default).
 func ValidEffort(s string) bool {
 	return s == "" || slices.Contains(EffortLevels, s)
+}
+
+// ValidEffortChoice reports whether s is a value the level picker accepts: an
+// --effort level, "" (model default), or "ultracode" (a session setting that
+// sends xhigh and orchestrates dynamic workflows, set via --settings).
+func ValidEffortChoice(s string) bool {
+	return s == "ultracode" || ValidEffort(s)
 }
 
 // EventKind classifies streamed events coming out of the claude CLI.
@@ -139,6 +146,9 @@ func (e *Engine) Send(ctx context.Context, prompt, resumeID string) <-chan Event
 	}
 	if e.Effort != "" {
 		args = append(args, "--effort", e.Effort)
+	}
+	if e.SettingsJSON != "" {
+		args = append(args, "--settings", e.SettingsJSON)
 	}
 	if e.MemoryFile != "" {
 		if _, err := os.Stat(e.MemoryFile); err == nil {
@@ -249,9 +259,6 @@ func (e *Engine) modeArgs() []string {
 		}
 		if e.MCPConfig != "" {
 			args = append(args, "--mcp-config", e.MCPConfig)
-		}
-		if e.SettingsJSON != "" {
-			args = append(args, "--settings", e.SettingsJSON)
 		}
 		return args
 	default:

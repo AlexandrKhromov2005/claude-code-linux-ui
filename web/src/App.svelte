@@ -15,7 +15,7 @@
   let settingsOpen = false;
   let modeWarning = '';
 
-  const effortLevels = ['', 'low', 'medium', 'high', 'xhigh', 'max'];
+  const effortLevels = ['', 'low', 'medium', 'high', 'xhigh', 'max', 'ultracode'];
   let effortSel = '';
   $: effortSel = $effort || '';
 

@@ -51,6 +51,36 @@ func TestValidEffort(t *testing.T) {
 			t.Errorf("ValidEffort(%q) = true, want false", bad)
 		}
 	}
+
+	// ultracode is a valid picker choice but not an --effort flag value.
+	if ValidEffort("ultracode") {
+		t.Errorf("ultracode must not be a valid --effort level")
+	}
+	if !ValidEffortChoice("ultracode") || !ValidEffortChoice("xhigh") || !ValidEffortChoice("") {
+		t.Errorf("ValidEffortChoice rejected a valid choice")
+	}
+	if ValidEffortChoice("turbo") {
+		t.Errorf("ValidEffortChoice accepted an invalid choice")
+	}
+}
+
+func TestBuildSettings(t *testing.T) {
+	p := &Project{Permissions: Permissions{Allow: []string{"Bash(go test:*)"}}}
+
+	if got := buildSettings(nil, false, false); got != "" {
+		t.Errorf("empty settings should be \"\", got %q", got)
+	}
+	if got := buildSettings(nil, false, true); !strings.Contains(got, `"ultracode":true`) || strings.Contains(got, "permissions") {
+		t.Errorf("ultracode-only settings = %q", got)
+	}
+	withPerms := buildSettings(p, true, false)
+	if !strings.Contains(withPerms, "permissions") || !strings.Contains(withPerms, "go test") || strings.Contains(withPerms, "ultracode") {
+		t.Errorf("perms-only settings = %q", withPerms)
+	}
+	both := buildSettings(p, true, true)
+	if !strings.Contains(both, "permissions") || !strings.Contains(both, `"ultracode":true`) {
+		t.Errorf("combined settings = %q", both)
+	}
 }
 
 func TestMakeTitle(t *testing.T) {

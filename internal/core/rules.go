@@ -79,19 +79,34 @@ func pathGlob(project *Project, path string) string {
 // settingsJSON builds the inline --settings value carrying the project's
 // remembered allow/deny rules. Claude Code enforces deny over allow.
 func settingsJSON(p *Project) string {
-	allow := []string{}
-	deny := []string{}
-	if p != nil {
-		if p.Permissions.Allow != nil {
-			allow = p.Permissions.Allow
+	return buildSettings(p, true, false)
+}
+
+// buildSettings assembles the inline --settings JSON. Permissions (allow/deny)
+// are included when withPerms is set; the session-only "ultracode" flag is
+// included when ultracode is set. It returns "" when there is nothing to send.
+func buildSettings(p *Project, withPerms, ultracode bool) string {
+	m := map[string]any{}
+	if withPerms {
+		allow := []string{}
+		deny := []string{}
+		if p != nil {
+			if p.Permissions.Allow != nil {
+				allow = p.Permissions.Allow
+			}
+			if p.Permissions.Deny != nil {
+				deny = p.Permissions.Deny
+			}
 		}
-		if p.Permissions.Deny != nil {
-			deny = p.Permissions.Deny
-		}
+		m["permissions"] = map[string]any{"allow": allow, "deny": deny}
 	}
-	b, _ := json.Marshal(map[string]any{
-		"permissions": map[string]any{"allow": allow, "deny": deny},
-	})
+	if ultracode {
+		m["ultracode"] = true
+	}
+	if len(m) == 0 {
+		return ""
+	}
+	b, _ := json.Marshal(m)
 	return string(b)
 }
 
