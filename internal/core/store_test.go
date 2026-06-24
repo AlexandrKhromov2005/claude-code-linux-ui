@@ -36,6 +36,8 @@ func TestConfigRoundTrip(t *testing.T) {
 	cfg.Theme = "dark"
 	cfg.BudgetWarnUSD = 2.5
 	cfg.SkipPerms = true
+	cfg.Effort = "xhigh"
+	cfg.MaxUploadMB = 2048
 	if err := s.SaveConfig(cfg); err != nil {
 		t.Fatalf("SaveConfig: %v", err)
 	}

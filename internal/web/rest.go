@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -355,44 +356,62 @@ func (s *Server) handleExport(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleUpload accepts a single file and returns an absolute path usable as a
-// turn attachment. Files land in a per-run uploads directory.
+// turn attachment. The part is streamed straight to disk (constant memory) so
+// large archives upload without buffering. Files land in a per-run uploads dir.
 func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
-	if err := r.ParseMultipartForm(32 << 20); err != nil {
+	mr, err := r.MultipartReader()
+	if err != nil {
 		badRequest(w, "invalid multipart form")
 		return
 	}
-	file, header, err := r.FormFile("file")
-	if err != nil {
-		badRequest(w, "file field required")
-		return
+	limit := int64(maxUploadBytes)
+	if mb := s.app.Config().MaxUploadMB; mb > 0 {
+		limit = int64(mb) << 20
 	}
-	defer file.Close()
-
-	dir := filepath.Join(os.TempDir(), "claude-code-linux-ui-uploads")
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		badRequest(w, err.Error())
-		return
-	}
-	name := filepath.Base(header.Filename)
-	if name == "" || name == "." || name == "/" {
-		name = "upload"
-	}
-	dst := filepath.Join(dir, strconv.FormatInt(time.Now().UnixNano(), 36)+"-"+name)
-	out, err := os.Create(dst)
-	if err != nil {
-		badRequest(w, err.Error())
-		return
-	}
-	if _, err := copyLimited(out, file, maxUploadBytes); err != nil {
-		out.Close()
-		os.Remove(dst)
-		if errors.Is(err, errFileTooLarge) {
-			badRequest(w, fmt.Sprintf("файл слишком большой (макс %d МБ)", maxUploadBytes>>20))
-		} else {
-			badRequest(w, err.Error())
+	for {
+		part, err := mr.NextPart()
+		if err == io.EOF {
+			break
 		}
+		if err != nil {
+			badRequest(w, "invalid multipart form")
+			return
+		}
+		if part.FormName() != "file" {
+			part.Close()
+			continue
+		}
+		name := filepath.Base(part.FileName())
+		if name == "" || name == "." || name == "/" {
+			name = "upload"
+		}
+		dir := filepath.Join(os.TempDir(), "claude-code-linux-ui-uploads")
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			part.Close()
+			badRequest(w, err.Error())
+			return
+		}
+		dst := filepath.Join(dir, strconv.FormatInt(time.Now().UnixNano(), 36)+"-"+name)
+		out, err := os.Create(dst)
+		if err != nil {
+			part.Close()
+			badRequest(w, err.Error())
+			return
+		}
+		_, copyErr := copyLimited(out, part, limit)
+		out.Close()
+		part.Close()
+		if copyErr != nil {
+			os.Remove(dst)
+			if errors.Is(copyErr, errFileTooLarge) {
+				badRequest(w, fmt.Sprintf("файл слишком большой (макс %d МБ)", limit>>20))
+			} else {
+				badRequest(w, copyErr.Error())
+			}
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"path": dst, "name": name})
 		return
 	}
-	out.Close()
-	writeJSON(w, http.StatusOK, map[string]string{"path": dst, "name": name})
+	badRequest(w, "file field required")
 }

@@ -31,6 +31,7 @@ type Config struct {
 	BudgetWarnUSD float64 `toml:"budget_warn_usd"`  // 0 = off
 	SkipPerms     bool    `toml:"skip_permissions"` // agent runs with --dangerously-skip-permissions
 	Effort        string  `toml:"effort"`           // reasoning effort level ("" = model default)
+	MaxUploadMB   int     `toml:"max_upload_mb"`    // attachment upload cap in MB (0 = built-in default)
 }
 
 // Permissions are the project's remembered allow/deny rules. Deny wins over allow.
