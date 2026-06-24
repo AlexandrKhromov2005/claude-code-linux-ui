@@ -30,6 +30,14 @@
 </script>
 
 <div class="message-list" bind:this={listEl}>
+  {#if $messages.length === 0 && !$streaming}
+    <div class="empty-chat">
+      <div class="empty-mark">✦</div>
+      <p class="empty-title">Чем займёмся?</p>
+      <p class="empty-sub">Напишите сообщение ниже, чтобы начать диалог.</p>
+    </div>
+  {/if}
+
   {#each $messages as msg (msg.ts + msg.role + msg.content?.slice(0, 20))}
     {#if msg.role === 'user'}
       <div class="msg msg-user">
@@ -99,18 +107,39 @@
   .message-list {
     flex: 1;
     overflow-y: auto;
-    padding: 16px 20px;
+    padding: 24px 20px 28px;
     display: flex;
     flex-direction: column;
-    gap: 6px;
+    align-items: center;
+    gap: 16px;
   }
 
   .msg {
     display: flex;
     flex-direction: column;
-    gap: 3px;
-    max-width: 100%;
+    gap: 5px;
+    width: 100%;
+    max-width: 820px;
   }
+
+  .empty-chat {
+    margin: auto;
+    text-align: center;
+    color: var(--text-dim);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 4px;
+  }
+  .empty-mark {
+    font-size: 30px;
+    color: var(--accent);
+    opacity: 0.85;
+    margin-bottom: 6px;
+    text-shadow: 0 0 24px rgba(217,119,87,0.4);
+  }
+  .empty-title { font-size: 18px; font-weight: 600; color: var(--text); }
+  .empty-sub { font-size: 13px; color: var(--text-dim); }
 
   .msg-meta {
     display: flex;
@@ -150,16 +179,18 @@
   }
 
   .msg-body {
-    background: var(--bg2);
-    border-radius: var(--radius);
-    padding: 8px 12px;
-    line-height: 1.6;
+    background: var(--bg-elev);
+    border: 1px solid var(--border-soft);
+    border-radius: var(--radius-lg);
+    padding: 11px 15px;
+    line-height: 1.65;
     word-break: break-word;
+    box-shadow: var(--shadow-sm);
   }
 
   .msg-user .msg-body {
-    background: var(--bg3);
-    border-left: 2px solid var(--border);
+    background: var(--accent-soft);
+    border-color: var(--accent-border);
   }
 
   .user-text {

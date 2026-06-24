@@ -141,9 +141,10 @@
 
 <style>
   .composer {
-    border-top: 1px solid var(--border);
-    padding: 10px 16px 12px;
-    background: var(--bg);
+    border-top: 1px solid var(--border-soft);
+    padding: 14px 20px 16px;
+    background: var(--bg2);
+    box-shadow: 0 -4px 16px rgba(0,0,0,0.18);
     flex-shrink: 0;
   }
 
@@ -160,8 +161,8 @@
     gap: 4px;
     background: var(--bg3);
     border: 1px solid var(--border);
-    border-radius: 4px;
-    padding: 2px 6px 2px 8px;
+    border-radius: 999px;
+    padding: 3px 8px 3px 11px;
     font-size: 12px;
     font-family: var(--mono);
   }
@@ -196,19 +197,19 @@
     flex: 1;
     resize: none;
     min-height: 64px;
-    max-height: 200px;
+    max-height: 220px;
     font-size: 14px;
-    line-height: 1.5;
-    background: var(--bg2);
+    line-height: 1.55;
+    background: var(--bg);
     color: var(--text);
     border: 1px solid var(--border);
-    border-radius: var(--radius);
-    padding: 8px 12px;
+    border-radius: var(--radius-lg);
+    padding: 11px 14px;
     outline: none;
-    transition: border-color 0.15s;
+    transition: border-color 0.15s, box-shadow 0.15s, background 0.15s;
   }
 
-  textarea:focus { border-color: var(--accent); }
+  textarea:focus { border-color: var(--accent); box-shadow: var(--ring); background: var(--bg-elev); }
   textarea:disabled { opacity: 0.5; }
 
   .controls {
@@ -222,33 +223,34 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    width: 34px;
-    height: 34px;
-    background: var(--bg2);
+    width: 36px;
+    height: 36px;
+    background: var(--bg3);
     border: 1px solid var(--border);
-    border-radius: var(--radius);
+    border-radius: 999px;
     color: var(--text-dim);
     cursor: pointer;
-    transition: color 0.15s, border-color 0.15s;
+    transition: color 0.15s, border-color 0.15s, background 0.15s;
   }
-  .attach-btn:hover { color: var(--text); border-color: var(--text-dim); }
+  .attach-btn:hover { color: var(--text); border-color: var(--text-dim); background: var(--bg-elev); }
   .attach-btn.disabled { opacity: 0.4; pointer-events: none; }
 
   .btn-send, .btn-cancel {
     display: flex;
     align-items: center;
     justify-content: center;
-    width: 34px;
-    height: 34px;
-    border-radius: var(--radius);
+    width: 36px;
+    height: 36px;
+    border-radius: 999px;
     border: 1px solid transparent;
   }
 
   .btn-send {
     background: var(--accent);
     color: #fff;
+    box-shadow: 0 2px 10px rgba(217,119,87,0.30);
   }
-  .btn-send:hover:not(:disabled) { background: var(--accent-dim); }
+  .btn-send:hover:not(:disabled) { background: var(--accent-strong); }
 
   .btn-cancel {
     background: rgba(224,92,92,0.18);

@@ -229,20 +229,20 @@
 
 <style>
   .sidebar {
-    width: 240px;
-    min-width: 200px;
-    max-width: 300px;
+    width: 256px;
+    min-width: 216px;
+    max-width: 320px;
     display: flex;
     flex-direction: column;
     background: var(--bg2);
-    border-right: 1px solid var(--border);
+    border-right: 1px solid var(--border-soft);
     overflow: hidden;
     flex-shrink: 0;
   }
 
   .sidebar-header {
     position: relative;
-    border-bottom: 1px solid var(--border);
+    border-bottom: 1px solid var(--border-soft);
     flex-shrink: 0;
   }
 
@@ -251,12 +251,13 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
-    padding: 12px 14px;
+    padding: 13px 16px;
     background: none;
     color: var(--text);
     border-radius: 0;
-    font-size: 13px;
+    font-size: 13.5px;
     font-weight: 600;
+    letter-spacing: -0.01em;
     text-align: left;
   }
   .project-btn:hover { background: var(--bg3); }
@@ -275,15 +276,17 @@
 
   .project-dropdown {
     position: absolute;
-    top: 100%;
-    left: 0;
-    right: 0;
-    background: var(--bg2);
+    top: calc(100% + 6px);
+    left: 8px;
+    right: 8px;
+    background: var(--bg-elev);
     border: 1px solid var(--border);
-    border-top: none;
+    border-radius: var(--radius);
+    box-shadow: var(--shadow-md);
     z-index: 10;
-    max-height: 240px;
+    max-height: 300px;
     overflow-y: auto;
+    padding: 5px;
   }
 
   .project-item {
@@ -291,16 +294,17 @@
     display: flex;
     flex-direction: column;
     align-items: flex-start;
-    padding: 8px 14px;
+    padding: 8px 10px;
     background: none;
     color: var(--text);
-    border-radius: 0;
+    border-radius: var(--radius-sm);
     font-size: 13px;
     text-align: left;
     gap: 2px;
   }
   .project-item:hover { background: var(--bg3); }
-  .project-item.active { background: rgba(217,119,87,0.12); }
+  .project-item.active { background: var(--accent-soft); }
+  .project-item.active .p-name { color: var(--accent-strong); }
 
   .p-name { font-weight: 500; }
   .p-cwd  { font-size: 11px; color: var(--text-dim); font-family: var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; width: 100%; }
@@ -342,15 +346,17 @@
   .connect-note { font-size: 10px; color: var(--text-dim); font-style: italic; }
 
   .search-box {
-    padding: 8px 10px;
-    border-bottom: 1px solid var(--border);
+    padding: 10px 12px;
+    border-bottom: 1px solid var(--border-soft);
     flex-shrink: 0;
   }
 
   .search-box input {
     width: 100%;
     font-size: 13px;
-    padding: 5px 9px;
+    padding: 7px 11px;
+    border-radius: 999px;
+    background: var(--bg);
   }
 
   .search-results {
@@ -381,50 +387,63 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
-    padding: 8px 12px 4px;
+    padding: 14px 14px 6px;
     flex-shrink: 0;
   }
 
   .section-label {
     font-size: 10px;
-    font-weight: 600;
+    font-weight: 700;
     text-transform: uppercase;
-    letter-spacing: 0.08em;
-    color: var(--text-dim);
+    letter-spacing: 0.10em;
+    color: var(--text-mute);
   }
 
   .new-thread-btn {
     background: none;
     color: var(--accent);
     font-size: 12px;
-    padding: 2px 6px;
-    border: 1px solid rgba(217,119,87,0.35);
-    border-radius: var(--radius);
+    font-weight: 500;
+    padding: 3px 9px;
+    border: 1px solid var(--accent-border);
+    border-radius: 999px;
+    transition: background 0.15s;
   }
-  .new-thread-btn:hover { background: rgba(217,119,87,0.12); }
+  .new-thread-btn:hover { background: var(--accent-soft); }
 
   .thread-list {
     flex: 1;
     overflow-y: auto;
     display: flex;
     flex-direction: column;
+    gap: 2px;
+    padding: 4px 8px 10px;
   }
 
   .thread-item {
+    position: relative;
     display: flex;
     flex-direction: column;
     align-items: flex-start;
-    padding: 8px 12px;
+    padding: 9px 11px;
     background: none;
     color: var(--text);
-    border-radius: 0;
-    border-bottom: 1px solid var(--border);
+    border-radius: var(--radius-sm);
     text-align: left;
-    gap: 3px;
+    gap: 4px;
     cursor: pointer;
+    transition: background 0.12s;
   }
   .thread-item:hover { background: var(--bg3); }
-  .thread-item.active { background: rgba(217,119,87,0.1); border-left: 2px solid var(--accent); }
+  .thread-item.active { background: var(--accent-soft); }
+  .thread-item.active::before {
+    content: '';
+    position: absolute;
+    left: 0; top: 8px; bottom: 8px;
+    width: 3px;
+    border-radius: 0 3px 3px 0;
+    background: var(--accent);
+  }
 
   .thread-title {
     font-size: 13px;
@@ -433,6 +452,7 @@
     white-space: nowrap;
     width: 100%;
   }
+  .thread-item.active .thread-title { color: var(--accent-strong); font-weight: 500; }
 
   .thread-meta {
     display: flex;

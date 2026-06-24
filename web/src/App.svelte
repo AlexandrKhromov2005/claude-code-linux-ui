@@ -167,19 +167,21 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
-    padding: 0 16px;
-    height: 44px;
-    border-bottom: 1px solid var(--border);
+    padding: 0 18px;
+    height: 50px;
+    border-bottom: 1px solid var(--border-soft);
     background: var(--bg2);
+    box-shadow: var(--shadow-sm);
     flex-shrink: 0;
-    gap: 8px;
+    gap: 10px;
     overflow: hidden;
+    z-index: 5;
   }
 
   .topbar-left, .topbar-right {
     display: flex;
     align-items: center;
-    gap: 6px;
+    gap: 8px;
     overflow: hidden;
   }
 
@@ -192,89 +194,105 @@
     text-overflow: ellipsis;
   }
 
-  .project-name { font-weight: 600; }
+  .project-name { font-weight: 600; letter-spacing: -0.01em; }
   .dim { color: var(--text-dim); }
-  .thread-title { max-width: 200px; }
+  .thread-title { max-width: 220px; }
 
-  .sep { color: var(--border); user-select: none; }
+  .sep { color: var(--border); user-select: none; opacity: 0.7; }
 
   .cost {
     font-family: var(--mono);
     font-size: 12px;
     color: var(--text-dim);
+    background: var(--bg3);
+    border: 1px solid var(--border-soft);
+    padding: 3px 9px;
+    border-radius: 999px;
   }
-  .cost.positive { color: var(--accent); }
+  .cost.positive { color: var(--accent); border-color: var(--accent-border); background: var(--accent-soft); }
 
   .effort-select {
     font-size: 12px;
-    padding: 3px 6px;
+    height: 30px;
+    padding: 0 8px;
     background: var(--bg3);
     color: var(--text-dim);
     border: 1px solid var(--border);
-    border-radius: 12px;
+    border-radius: 999px;
     cursor: pointer;
-    max-width: 130px;
+    max-width: 150px;
+    transition: border-color 0.15s, color 0.15s, box-shadow 0.15s;
   }
   .effort-select:hover { border-color: var(--text-dim); color: var(--text); }
-  .effort-select:focus { outline: none; border-color: var(--accent); }
+  .effort-select:focus { outline: none; border-color: var(--accent); box-shadow: var(--ring); }
 
   .mode-toggle {
     font-size: 12px;
-    padding: 3px 10px;
+    height: 30px;
+    padding: 0 13px;
     background: var(--bg3);
     color: var(--text-dim);
     border: 1px solid var(--border);
-    border-radius: 12px;
+    border-radius: 999px;
     text-transform: lowercase;
     letter-spacing: 0.03em;
     transition: all 0.15s;
   }
   .mode-toggle:hover { border-color: var(--text-dim); color: var(--text); }
   .mode-toggle.agent {
-    background: rgba(217,119,87,0.15);
-    color: var(--accent);
-    border-color: rgba(217,119,87,0.4);
+    background: var(--accent-soft);
+    color: var(--accent-strong);
+    border-color: var(--accent-border);
+    font-weight: 600;
   }
 
   .skip-toggle {
     font-size: 12px;
-    padding: 3px 9px;
+    height: 30px;
+    padding: 0 11px;
     background: var(--bg3);
     color: var(--text-dim);
     border: 1px solid var(--border);
-    border-radius: 12px;
+    border-radius: 999px;
     letter-spacing: 0.02em;
     transition: all 0.15s;
   }
   .skip-toggle:hover { border-color: var(--red); color: var(--text); }
   .skip-toggle.active {
-    background: rgba(224,92,92,0.18);
+    background: var(--red-soft);
     color: var(--red);
-    border-color: rgba(224,92,92,0.5);
+    border-color: rgba(226,96,96,0.5);
     font-weight: 600;
+    box-shadow: 0 0 0 3px rgba(226,96,96,0.10);
   }
 
   .ws-dot {
-    width: 7px;
-    height: 7px;
+    width: 8px;
+    height: 8px;
     border-radius: 50%;
-    background: var(--border);
+    background: var(--text-mute);
     flex-shrink: 0;
-    transition: background 0.3s;
+    margin: 0 2px;
+    transition: background 0.3s, box-shadow 0.3s;
   }
-  .ws-dot.connected { background: var(--green); }
+  .ws-dot.connected {
+    background: var(--green);
+    box-shadow: 0 0 0 3px var(--green-soft);
+  }
 
   .icon-btn {
     background: none;
     color: var(--text-dim);
-    padding: 4px;
+    width: 30px;
+    height: 30px;
+    padding: 0;
     display: flex;
     align-items: center;
     justify-content: center;
     border: 1px solid transparent;
-    border-radius: var(--radius);
+    border-radius: 999px;
   }
-  .icon-btn:hover { color: var(--text); border-color: var(--border); }
+  .icon-btn:hover { color: var(--text); background: var(--bg3); border-color: var(--border); }
 
   .warning-bar {
     display: flex;
