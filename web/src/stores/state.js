@@ -6,6 +6,7 @@ export const messages = writable([]);          // Msg[] for the current thread
 export const streaming = writable(false);      // turn in progress
 export const liveText = writable('');          // accumulating assistant text delta
 export const liveTool = writable('');          // tool the agent is currently running
+export const turnThreadId = writable(null);    // id of the thread the in-flight turn belongs to
 export const pendingApproval = writable(null); // approval_request payload | null
 export const attachments = writable([]);       // { path, name }[] queued for next send
 export const wsConnected = writable(false);
@@ -17,3 +18,11 @@ export const mode = derived(appState, $s => $s?.mode ?? 'chat');
 export const skipPerms = derived(appState, $s => $s?.skipPerms ?? false);
 export const effort = derived(appState, $s => $s?.effort ?? '');
 export const cost = derived(appState, $s => $s?.cost ?? 0);
+
+// True when the currently open thread is the one the in-flight turn belongs to.
+// Live output (streaming text, "agent thinking", appended messages) must only
+// render for this thread, never leak into other threads of the project.
+export const onTurnThread = derived(
+  [appState, turnThreadId],
+  ([$s, $t]) => $t != null && $s?.thread?.id === $t,
+);
