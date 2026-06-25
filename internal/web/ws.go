@@ -241,6 +241,11 @@ func eventToMsg(ev core.Event) map[string]any {
 	if ev.Err != nil {
 		m["error"] = ev.Err.Error()
 	}
+	if ev.LimitType != "" {
+		m["limitType"] = ev.LimitType
+		m["limitResets"] = ev.LimitResets
+		m["limitStatus"] = ev.LimitStatus
+	}
 	return m
 }
 
@@ -260,6 +265,8 @@ func eventKind(k core.EventKind) string {
 		return "retry"
 	case core.EvNotice:
 		return "notice"
+	case core.EvRateLimit:
+		return "rate_limit"
 	default:
 		return "unknown"
 	}

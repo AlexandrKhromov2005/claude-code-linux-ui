@@ -64,6 +64,7 @@ const (
 	EvError                       // something went wrong
 	EvRetry                       // API retry in progress
 	EvNotice                      // an out-of-band notice from the core (e.g. budget)
+	EvRateLimit                   // a subscription rate-limit status update
 )
 
 // Event is the normalized unit a client consumes. It is deliberately a plain
@@ -83,6 +84,12 @@ type Event struct {
 	// used_percentage formula; CtxWindow is the model's context window size.
 	CtxUsed   int
 	CtxWindow int
+
+	// Subscription rate-limit status from a rate_limit_event. The headless CLI
+	// reports the binding limit's type, reset time and status (no percentage).
+	LimitType   string // "five_hour" | "seven_day"
+	LimitResets int64  // unix seconds when the window resets
+	LimitStatus string // e.g. "allowed"
 }
 
 // Engine drives Claude Code in headless mode (`claude -p`). It is configured
@@ -131,6 +138,22 @@ type rawEvent struct {
 	ModelUsage map[string]struct {
 		ContextWindow int `json:"contextWindow"`
 	} `json:"modelUsage"`
+
+	// assistant message: per-call usage; the last one reflects current context
+	Message struct {
+		Usage struct {
+			InputTokens         int `json:"input_tokens"`
+			CacheCreationTokens int `json:"cache_creation_input_tokens"`
+			CacheReadTokens     int `json:"cache_read_input_tokens"`
+		} `json:"usage"`
+	} `json:"message"`
+
+	// rate_limit_event: binding subscription limit
+	RateLimitInfo struct {
+		Status        string `json:"status"`
+		ResetsAt      int64  `json:"resetsAt"`
+		RateLimitType string `json:"rateLimitType"`
+	} `json:"rate_limit_info"`
 }
 
 // streamInner is the relevant slice of a raw Anthropic stream event.
@@ -203,6 +226,11 @@ func (e *Engine) Send(ctx context.Context, prompt, resumeID string) <-chan Event
 		// stream-json lines (and especially attached-file echoes) can be large.
 		sc.Buffer(make([]byte, 0, 1<<20), 32<<20)
 
+		// lastCtx tracks the most recent API call's context size (input + cache).
+		// The result event's top-level usage sums every tool iteration, so it
+		// overcounts; the last assistant message reflects the live context.
+		var lastCtx int
+
 		for sc.Scan() {
 			line := strings.TrimSpace(sc.Text())
 			if line == "" {
@@ -220,6 +248,21 @@ func (e *Engine) Send(ctx context.Context, prompt, resumeID string) <-chan Event
 					out <- Event{Kind: EvSystemInit, SessionID: re.SessionID, Model: re.Model}
 				case "api_retry":
 					out <- Event{Kind: EvRetry, Attempt: re.Attempt}
+				}
+
+			case "assistant":
+				if c := re.Message.Usage.InputTokens + re.Message.Usage.CacheReadTokens + re.Message.Usage.CacheCreationTokens; c > 0 {
+					lastCtx = c
+				}
+
+			case "rate_limit_event":
+				if re.RateLimitInfo.RateLimitType != "" {
+					out <- Event{
+						Kind:        EvRateLimit,
+						LimitType:   re.RateLimitInfo.RateLimitType,
+						LimitResets: re.RateLimitInfo.ResetsAt,
+						LimitStatus: re.RateLimitInfo.Status,
+					}
 				}
 
 			case "stream_event":
@@ -246,7 +289,12 @@ func (e *Engine) Send(ctx context.Context, prompt, resumeID string) <-chan Event
 					}
 					out <- Event{Kind: EvError, Err: fmt.Errorf("%s", msg)}
 				} else {
-					ctxUsed := re.Usage.InputTokens + re.Usage.CacheReadTokens + re.Usage.CacheCreationTokens
+					// Prefer the last assistant call's context; fall back to the
+					// (aggregate) result usage only if no assistant usage was seen.
+					ctxUsed := lastCtx
+					if ctxUsed == 0 {
+						ctxUsed = re.Usage.InputTokens + re.Usage.CacheReadTokens + re.Usage.CacheCreationTokens
+					}
 					ctxWindow := 0
 					model := re.Model
 					for id, mu := range re.ModelUsage {

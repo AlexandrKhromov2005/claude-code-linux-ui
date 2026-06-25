@@ -65,9 +65,10 @@ type stateDTO struct {
 	Effort      string `json:"effort"`
 	Model       string `json:"model"`
 	ModelActual string `json:"modelActual"`
-	CtxUsed     int    `json:"ctxUsed"`
-	CtxWindow   int    `json:"ctxWindow"`
-	Cost        float64 `json:"cost"`
+	CtxUsed     int             `json:"ctxUsed"`
+	CtxWindow   int             `json:"ctxWindow"`
+	Limits      []core.RateLimit `json:"limits"`
+	Cost        float64         `json:"cost"`
 	Theme     string            `json:"theme"`
 	Budget    float64           `json:"budget"`
 	Perm      struct {
@@ -100,6 +101,7 @@ func (s *Server) state() stateDTO {
 	d.Model = s.app.Model()
 	d.ModelActual = s.app.ModelActual()
 	d.CtxUsed, d.CtxWindow = s.app.ContextInfo()
+	d.Limits = s.app.Limits()
 	d.Cost = s.app.Cost()
 	cfg := s.app.Config()
 	d.Theme = cfg.Theme

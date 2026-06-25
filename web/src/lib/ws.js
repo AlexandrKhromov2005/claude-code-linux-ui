@@ -131,6 +131,16 @@ function handleEvent(msg) {
       ]);
       break;
 
+    case 'rate_limit':
+      appState.update(s => {
+        if (!s) return s;
+        const limits = (s.limits || []).filter(l => l.type !== msg.limitType);
+        limits.push({ type: msg.limitType, resetsAt: msg.limitResets, status: msg.limitStatus });
+        limits.sort((a, b) => (a.type === 'five_hour' ? 0 : 1) - (b.type === 'five_hour' ? 0 : 1));
+        return { ...s, limits };
+      });
+      break;
+
     case 'error':
       messages.update(ms => [
         ...ms,

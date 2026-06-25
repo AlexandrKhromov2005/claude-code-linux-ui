@@ -57,6 +57,27 @@
     return String(n);
   }
 
+  // Subscription rate limits (5-hour / weekly). Headless exposes status + reset
+  // time, not a percentage.
+  $: limits = $appState?.limits ?? [];
+  function limitShort(t) {
+    return t === 'five_hour' ? '5ч' : t === 'seven_day' ? 'нед' : t;
+  }
+  function limitFull(t) {
+    return t === 'five_hour' ? '5-часовой лимит' : t === 'seven_day' ? 'недельный лимит' : t;
+  }
+  function fmtReset(ts) {
+    if (!ts) return '';
+    try {
+      return new Date(ts * 1000).toLocaleString('ru-RU', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
+    } catch { return ''; }
+  }
+  function limitTitle(l) {
+    const status = l.status === 'allowed' ? 'в норме' : (l.status || '?');
+    const reset = l.resetsAt ? ` · сброс: ${fmtReset(l.resetsAt)}` : '';
+    return `${limitFull(l.type)} · ${status}${reset}`;
+  }
+
   onMount(async () => {
     try {
       const state = await api.getState();
@@ -122,6 +143,12 @@
       </div>
 
       <div class="topbar-right">
+        {#each limits as l}
+          <span class="lim" class:bad={l.status && l.status !== 'allowed'} title={limitTitle(l)}>
+            <span class="lim-dot"></span>{limitShort(l.type)}
+          </span>
+        {/each}
+
         {#if ctxWindow > 0}
           <div
             class="ctx"
@@ -324,6 +351,32 @@
   .ctx.warn .ctx-fill { background: #e0a85c; }
   .ctx.crit .ctx-fill { background: var(--red); }
   .ctx.crit .ctx-label { color: var(--red); }
+
+  .lim {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    height: 30px;
+    padding: 0 10px;
+    font-size: 11px;
+    font-family: var(--mono);
+    border-radius: 999px;
+    background: var(--green-soft);
+    color: var(--green);
+    border: 1px solid rgba(99,194,103,0.30);
+    white-space: nowrap;
+  }
+  .lim-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: currentColor;
+  }
+  .lim.bad {
+    background: var(--red-soft);
+    color: var(--red);
+    border-color: rgba(226,96,96,0.4);
+  }
 
   .mode-toggle {
     font-size: 12px;

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -11,6 +12,14 @@ import (
 
 // ErrNoProject is returned when a turn is attempted without an open project.
 var ErrNoProject = errors.New("нет активного проекта")
+
+// RateLimit is a subscription rate-limit window's latest status. The headless
+// CLI exposes the window type, reset time and status, but no percentage used.
+type RateLimit struct {
+	Type     string `json:"type"`     // "five_hour" | "seven_day"
+	ResetsAt int64  `json:"resetsAt"` // unix seconds
+	Status   string `json:"status"`   // e.g. "allowed"
+}
 
 // App is the UI-agnostic orchestration layer. It owns the engine, store, the
 // current project/thread/mode and the turn lifecycle. All mutable state is
@@ -41,6 +50,10 @@ type App struct {
 	ctxUsed     int
 	ctxWindow   int
 	modelActual string
+
+	// limits holds the latest subscription rate-limit status per window type,
+	// from rate_limit_event messages (account-wide; no percentage is exposed).
+	limits map[string]RateLimit
 
 	cost         float64
 	budgetWarned bool
@@ -149,6 +162,37 @@ func (a *App) SetModel(model string) error {
 	_ = a.store.SaveConfig(a.cfg)
 	a.configureEngineLocked()
 	return nil
+}
+
+// Limits returns the known rate-limit windows, five-hour first.
+func (a *App) Limits() []RateLimit {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	out := make([]RateLimit, 0, len(a.limits))
+	for _, v := range a.limits {
+		out = append(out, v)
+	}
+	rank := func(t string) int {
+		if t == "five_hour" {
+			return 0
+		}
+		return 1
+	}
+	sort.Slice(out, func(i, j int) bool { return rank(out[i].Type) < rank(out[j].Type) })
+	return out
+}
+
+// setLimit records the latest status for one rate-limit window.
+func (a *App) setLimit(typ string, resetsAt int64, status string) {
+	if typ == "" {
+		return
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.limits == nil {
+		a.limits = map[string]RateLimit{}
+	}
+	a.limits[typ] = RateLimit{Type: typ, ResetsAt: resetsAt, Status: status}
 }
 
 // setContext records the latest context usage and effective model from a turn.
@@ -468,6 +512,8 @@ func (a *App) SendTurn(ctx context.Context, text string, attachments []string) (
 				buf.WriteString(ev.Text)
 			case EvSystemInit:
 				a.setSessionID(slug, th, ev.SessionID)
+			case EvRateLimit:
+				a.setLimit(ev.LimitType, ev.LimitResets, ev.LimitStatus)
 			case EvResult:
 				hadResult = true
 				a.setSessionID(slug, th, ev.SessionID)
