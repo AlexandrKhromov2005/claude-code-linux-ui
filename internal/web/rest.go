@@ -33,6 +33,7 @@ func (s *Server) registerAPI(mux *http.ServeMux) {
 	mux.HandleFunc("/api/effort", s.guard(s.handleEffort))
 	mux.HandleFunc("/api/model", s.guard(s.handleModel))
 	mux.HandleFunc("/api/memory", s.guard(s.handleMemory))
+	mux.HandleFunc("/api/memory/auto", s.guard(s.handleAutoMemory))
 	mux.HandleFunc("/api/theme", s.guard(s.handleTheme))
 	mux.HandleFunc("/api/budget", s.guard(s.handleBudget))
 	mux.HandleFunc("/api/export", s.guard(s.handleExport))
@@ -325,6 +326,33 @@ func (s *Server) handleMemory(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
+func (s *Server) handleAutoMemory(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodPost {
+		var body struct {
+			Enabled *bool `json:"enabled"`
+			Clear   bool  `json:"clear"`
+		}
+		if err := readJSON(r, &body); err != nil {
+			badRequest(w, "bad body")
+			return
+		}
+		if body.Clear {
+			if err := s.app.ClearAutoMemory(); err != nil {
+				badRequest(w, err.Error())
+				return
+			}
+		}
+		if body.Enabled != nil {
+			if err := s.app.SetAutoMemory(*body.Enabled); err != nil {
+				badRequest(w, err.Error())
+				return
+			}
+		}
+	}
+	content, _ := s.app.ReadAutoMemory()
+	writeJSON(w, http.StatusOK, map[string]any{"content": content, "enabled": s.app.AutoMemoryEnabled()})
 }
 
 func (s *Server) handleTheme(w http.ResponseWriter, r *http.Request) {

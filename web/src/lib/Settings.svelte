@@ -10,9 +10,36 @@
   let budgetInput = '';
   let saving = {};
 
+  let autoMem = '';
+  let autoEnabled = true;
+
   $: if (open) {
     loadMemory();
+    loadAutoMemory();
     budgetInput = String($appState?.budget ?? 0);
+  }
+
+  async function loadAutoMemory() {
+    try {
+      const r = await api.getAutoMemory();
+      autoMem = r.content || '';
+      autoEnabled = !!r.enabled;
+    } catch {}
+  }
+
+  async function toggleAutoMemory() {
+    try {
+      const r = await api.setAutoMemory({ enabled: !autoEnabled });
+      autoEnabled = !!r.enabled;
+    } catch {}
+  }
+
+  async function clearAutoMemory() {
+    if (!confirm('Очистить накопленную память проекта?')) return;
+    try {
+      const r = await api.setAutoMemory({ clear: true });
+      autoMem = r.content || '';
+    } catch {}
   }
 
   async function loadMemory() {
@@ -118,6 +145,24 @@
           </button>
         {/if}
       </section>
+
+      <!-- Cross-thread auto memory -->
+      <section class="memory-section">
+        <h3>Память между тредами (авто)</h3>
+        <div class="row">
+          <button class="toggle-btn" class:on={autoEnabled} on:click={toggleAutoMemory}>
+            <span class="toggle-knob"></span>
+            {autoEnabled ? 'Включено' : 'Выключено'}
+          </button>
+          <button class="save-btn ghost" on:click={clearAutoMemory} disabled={!autoMem}>Очистить</button>
+        </div>
+        <p class="hint">После каждого хода Claude кратко резюмирует ключевые факты сюда (дешёвой моделью), и эта память подмешивается во все треды проекта.</p>
+        {#if autoMem}
+          <pre class="auto-mem">{autoMem}</pre>
+        {:else}
+          <p class="hint">Пока пусто — наполнится по ходу диалогов.</p>
+        {/if}
+      </section>
     </div>
   </div>
 {/if}
@@ -215,6 +260,60 @@
   .hint {
     font-size: 12px;
     color: var(--text-dim);
+  }
+
+  .toggle-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    background: var(--bg3);
+    color: var(--text-dim);
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    padding: 5px 12px 5px 6px;
+    font-size: 13px;
+  }
+  .toggle-knob {
+    width: 22px;
+    height: 14px;
+    border-radius: 999px;
+    background: var(--border);
+    position: relative;
+    transition: background 0.15s;
+    flex-shrink: 0;
+  }
+  .toggle-knob::after {
+    content: '';
+    position: absolute;
+    top: 2px; left: 2px;
+    width: 10px; height: 10px;
+    border-radius: 50%;
+    background: var(--text-dim);
+    transition: transform 0.15s, background 0.15s;
+  }
+  .toggle-btn.on { color: var(--accent); border-color: var(--accent-border); }
+  .toggle-btn.on .toggle-knob { background: var(--accent-soft); }
+  .toggle-btn.on .toggle-knob::after { transform: translateX(8px); background: var(--accent); }
+
+  .save-btn.ghost {
+    background: none;
+    color: var(--text-dim);
+    border: 1px solid var(--border);
+  }
+  .save-btn.ghost:hover:not(:disabled) { background: var(--bg3); color: var(--text); }
+
+  .auto-mem {
+    font-family: var(--mono);
+    font-size: 12px;
+    background: var(--bg3);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 10px 12px;
+    max-height: 200px;
+    overflow-y: auto;
+    white-space: pre-wrap;
+    word-break: break-word;
+    color: var(--text);
   }
 
   .memory-section textarea {

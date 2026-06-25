@@ -3,6 +3,7 @@ package core
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -47,6 +48,34 @@ func TestConfigRoundTrip(t *testing.T) {
 	}
 	if got != cfg {
 		t.Fatalf("config round-trip mismatch:\n got %+v\nwant %+v", got, cfg)
+	}
+}
+
+func TestRuntimeMemory(t *testing.T) {
+	s := newTestStore(t)
+	p, err := s.CreateProject("Mem", "/tmp/mem")
+	if err != nil {
+		t.Fatal(err)
+	}
+	slug := p.Slug()
+	if err := s.WriteMemory(slug, "Заметка пользователя"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.WriteAutoMemory(slug, "- факт один\n- факт два"); err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(s.RuntimeMemoryPath(slug))
+	if err != nil {
+		t.Fatalf("runtime memory: %v", err)
+	}
+	out := string(b)
+	for _, want := range []string{"Заметка пользователя", "накопленная", "факт один", "факт два"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("runtime memory missing %q in:\n%s", want, out)
+		}
+	}
+	if got, _ := s.ReadAutoMemory(slug); got != "- факт один\n- факт два" {
+		t.Errorf("auto memory read = %q", got)
 	}
 }
 

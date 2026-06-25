@@ -32,6 +32,8 @@ type Config struct {
 	SkipPerms     bool    `toml:"skip_permissions"` // agent runs with --dangerously-skip-permissions
 	Effort        string  `toml:"effort"`           // reasoning effort level ("" = model default)
 	MaxUploadMB   int     `toml:"max_upload_mb"`    // attachment upload cap in MB (0 = built-in default)
+
+	AutoMemoryDisabled bool `toml:"auto_memory_disabled"` // turn off cross-thread auto memory
 }
 
 // Permissions are the project's remembered allow/deny rules. Deny wins over allow.
@@ -139,8 +141,19 @@ func (s *Store) projectDir(slug string) string { return filepath.Join(s.projects
 func (s *Store) threadsDir(slug string) string { return filepath.Join(s.projectDir(slug), "threads") }
 func (s *Store) configPath() string            { return filepath.Join(s.ConfigDir, "config.toml") }
 
-// MemoryPath returns the project's memory.md (fed to --append-system-prompt-file).
+// MemoryPath returns the project's user-edited memory.md.
 func (s *Store) MemoryPath(slug string) string { return filepath.Join(s.projectDir(slug), "memory.md") }
+
+// AutoMemoryPath returns the auto-maintained cross-thread memory file.
+func (s *Store) AutoMemoryPath(slug string) string {
+	return filepath.Join(s.projectDir(slug), "auto-memory.md")
+}
+
+// RuntimeMemoryPath returns the combined memory file actually injected into every
+// thread (user memory.md plus auto-memory), rebuilt by RegenRuntimeMemory.
+func (s *Store) RuntimeMemoryPath(slug string) string {
+	return filepath.Join(s.projectDir(slug), "memory.runtime.md")
+}
 
 func (s *Store) threadPath(slug, id string) string {
 	return filepath.Join(s.threadsDir(slug), id+".json")
@@ -310,9 +323,47 @@ func (s *Store) ReadMemory(slug string) (string, error) {
 	return string(b), err
 }
 
-// WriteMemory replaces the project memory file.
+// ReadAutoMemory returns the auto-maintained memory text ("" when absent).
+func (s *Store) ReadAutoMemory(slug string) (string, error) {
+	b, err := os.ReadFile(s.AutoMemoryPath(slug))
+	if errors.Is(err, os.ErrNotExist) {
+		return "", nil
+	}
+	return string(b), err
+}
+
+// WriteAutoMemory replaces the auto-memory file and rebuilds the runtime file.
+func (s *Store) WriteAutoMemory(slug, content string) error {
+	if err := writeFileAtomic(s.AutoMemoryPath(slug), []byte(content)); err != nil {
+		return err
+	}
+	return s.RegenRuntimeMemory(slug)
+}
+
+// RegenRuntimeMemory rebuilds the combined memory file (user memory + auto-memory)
+// that is injected into every thread via --append-system-prompt-file.
+func (s *Store) RegenRuntimeMemory(slug string) error {
+	user, _ := s.ReadMemory(slug)
+	auto, _ := s.ReadAutoMemory(slug)
+	var b strings.Builder
+	if strings.TrimSpace(user) != "" {
+		b.WriteString(strings.TrimRight(user, "\n"))
+		b.WriteString("\n\n")
+	}
+	if strings.TrimSpace(auto) != "" {
+		b.WriteString("# Память проекта, накопленная между диалогами\n\n")
+		b.WriteString(strings.TrimRight(auto, "\n"))
+		b.WriteString("\n")
+	}
+	return writeFileAtomic(s.RuntimeMemoryPath(slug), []byte(b.String()))
+}
+
+// WriteMemory replaces the user memory file and rebuilds the runtime file.
 func (s *Store) WriteMemory(slug, content string) error {
-	return writeFileAtomic(s.MemoryPath(slug), []byte(content))
+	if err := writeFileAtomic(s.MemoryPath(slug), []byte(content)); err != nil {
+		return err
+	}
+	return s.RegenRuntimeMemory(slug)
 }
 
 // ---- threads --------------------------------------------------------------

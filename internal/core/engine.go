@@ -323,6 +323,35 @@ func (e *Engine) Send(ctx context.Context, prompt, resumeID string) <-chan Event
 	return out
 }
 
+// RunOneShot runs a single non-interactive prompt and returns its text result.
+// It is for side tasks (e.g. memory summarization), separate from the main
+// streaming turn: no tools, no resume, no memory injection.
+func RunOneShot(ctx context.Context, bin, cwd, model, effort, prompt string) (string, error) {
+	args := []string{"-p", prompt, "--output-format", "json", "--permission-mode", "dontAsk"}
+	if model != "" {
+		args = append(args, "--model", model)
+	}
+	if effort != "" {
+		args = append(args, "--effort", effort)
+	}
+	cmd := exec.CommandContext(ctx, bin, args...)
+	if cwd != "" {
+		cmd.Dir = cwd
+	}
+	out, err := cmd.Output()
+	if err != nil {
+		return "", err
+	}
+	var r struct {
+		Result  string `json:"result"`
+		IsError bool   `json:"is_error"`
+	}
+	if json.Unmarshal(out, &r) != nil || r.IsError {
+		return "", fmt.Errorf("summary failed")
+	}
+	return r.Result, nil
+}
+
 // modeArgs returns the tool-policy flags for the engine's current mode.
 func (e *Engine) modeArgs() []string {
 	switch e.Mode {
