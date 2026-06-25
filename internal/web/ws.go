@@ -129,8 +129,13 @@ func (c *wsConn) startTurn(text string, attachments []string) {
 			m := eventToMsg(ev)
 			// The result event carries this turn's cost; the client shows the
 			// running session total, so report the accumulated value instead.
+			// Context usage and the effective model ride along on the same event.
 			if ev.Kind == core.EvResult {
 				m["cost"] = c.s.app.Cost()
+				used, win := c.s.app.ContextInfo()
+				m["ctxUsed"] = used
+				m["ctxWindow"] = win
+				m["modelActual"] = c.s.app.ModelActual()
 			}
 			_ = c.writeJSON(m)
 		}

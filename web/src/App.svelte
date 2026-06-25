@@ -30,6 +30,33 @@
     return v === '' ? 'авто' : v;
   }
 
+  const modelOptions = ['', 'opus', 'sonnet', 'haiku', 'opusplan', 'fable'];
+  let modelSel = '';
+  $: modelSel = $appState?.model || '';
+
+  async function pickModel() {
+    try {
+      const res = await api.setModel(modelSel);
+      appState.set(res);
+    } catch {}
+  }
+
+  function modelLabel(v) {
+    return v === '' ? 'default' : v;
+  }
+
+  // Context-window usage from the last turn.
+  $: ctxUsed = $appState?.ctxUsed ?? 0;
+  $: ctxWindow = $appState?.ctxWindow ?? 0;
+  $: ctxPct = ctxWindow > 0 ? Math.min(100, (ctxUsed / ctxWindow) * 100) : 0;
+  $: ctxLeft = Math.max(0, 100 - ctxPct);
+
+  function fmtTokens(n) {
+    if (n >= 1e6) return (n / 1e6).toFixed(n >= 1e7 ? 0 : 1) + 'M';
+    if (n >= 1e3) return Math.round(n / 1e3) + 'k';
+    return String(n);
+  }
+
   onMount(async () => {
     try {
       const state = await api.getState();
@@ -75,7 +102,16 @@
         {#if $appState?.project}
           <span class="meta-item project-name">{$appState.project.name}</span>
           <span class="sep">·</span>
-          <span class="meta-item dim">{$appState.project.model || 'default'}</span>
+          <select
+            class="topbar-select model-select"
+            bind:value={modelSel}
+            on:change={pickModel}
+            title={'Модель (--model)' + ($appState?.modelActual ? ' · фактически: ' + $appState.modelActual : '')}
+          >
+            {#each modelOptions as m}
+              <option value={m}>{modelLabel(m)}</option>
+            {/each}
+          </select>
         {:else}
           <span class="meta-item dim">нет проекта</span>
         {/if}
@@ -86,6 +122,18 @@
       </div>
 
       <div class="topbar-right">
+        {#if ctxWindow > 0}
+          <div
+            class="ctx"
+            class:warn={ctxPct >= 70}
+            class:crit={ctxPct >= 88}
+            title={`Контекст: ${fmtTokens(ctxUsed)} / ${fmtTokens(ctxWindow)} токенов · осталось ${Math.round(ctxLeft)}%`}
+          >
+            <span class="ctx-bar"><span class="ctx-fill" style="width:{Math.max(3, ctxPct)}%"></span></span>
+            <span class="ctx-label">{ctxPct < 1 ? '<1' : Math.round(ctxPct)}%</span>
+          </div>
+        {/if}
+
         <span class="meta-item cost" class:positive={$cost > 0}>{formatCost($cost)}</span>
 
         <!-- Effort level -->
@@ -225,6 +273,57 @@
   }
   .effort-select:hover { border-color: var(--text-dim); color: var(--text); }
   .effort-select:focus { outline: none; border-color: var(--accent); box-shadow: var(--ring); }
+
+  .topbar-select {
+    font-size: 12px;
+    height: 28px;
+    padding: 0 8px;
+    background: var(--bg3);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    cursor: pointer;
+    max-width: 140px;
+    transition: border-color 0.15s, color 0.15s, box-shadow 0.15s;
+  }
+  .topbar-select:hover { border-color: var(--text-dim); }
+  .topbar-select:focus { outline: none; border-color: var(--accent); box-shadow: var(--ring); }
+  .model-select { font-weight: 500; }
+
+  .ctx {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    height: 30px;
+    padding: 0 11px;
+    background: var(--bg3);
+    border: 1px solid var(--border-soft);
+    border-radius: 999px;
+  }
+  .ctx-bar {
+    width: 46px;
+    height: 5px;
+    border-radius: 3px;
+    background: var(--bg);
+    overflow: hidden;
+  }
+  .ctx-fill {
+    display: block;
+    height: 100%;
+    border-radius: 3px;
+    background: var(--green);
+    transition: width 0.3s ease, background 0.3s;
+  }
+  .ctx-label {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--text-dim);
+    min-width: 24px;
+    text-align: right;
+  }
+  .ctx.warn .ctx-fill { background: #e0a85c; }
+  .ctx.crit .ctx-fill { background: var(--red); }
+  .ctx.crit .ctx-label { color: var(--red); }
 
   .mode-toggle {
     font-size: 12px;

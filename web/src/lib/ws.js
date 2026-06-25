@@ -108,7 +108,13 @@ function handleEvent(msg) {
 
     case 'result':
       liveTool.set('');
-      appState.update(s => s ? { ...s, cost: msg.cost ?? s.cost } : s);
+      appState.update(s => s ? {
+        ...s,
+        cost: msg.cost ?? s.cost,
+        ctxUsed: msg.ctxUsed ?? s.ctxUsed,
+        ctxWindow: msg.ctxWindow ?? s.ctxWindow,
+        modelActual: msg.modelActual ?? s.modelActual,
+      } : s);
       break;
 
     case 'retry':

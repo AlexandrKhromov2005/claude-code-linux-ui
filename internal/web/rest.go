@@ -31,6 +31,7 @@ func (s *Server) registerAPI(mux *http.ServeMux) {
 	mux.HandleFunc("/api/mode", s.guard(s.handleMode))
 	mux.HandleFunc("/api/permissions/skip", s.guard(s.handleSkipPerms))
 	mux.HandleFunc("/api/effort", s.guard(s.handleEffort))
+	mux.HandleFunc("/api/model", s.guard(s.handleModel))
 	mux.HandleFunc("/api/memory", s.guard(s.handleMemory))
 	mux.HandleFunc("/api/theme", s.guard(s.handleTheme))
 	mux.HandleFunc("/api/budget", s.guard(s.handleBudget))
@@ -59,10 +60,14 @@ type threadSummaryDTO struct {
 type stateDTO struct {
 	Project   *projectDTO       `json:"project"`
 	Thread    *threadSummaryDTO `json:"thread"`
-	Mode      string            `json:"mode"`
-	SkipPerms bool              `json:"skipPerms"`
-	Effort    string            `json:"effort"`
-	Cost      float64           `json:"cost"`
+	Mode        string `json:"mode"`
+	SkipPerms   bool   `json:"skipPerms"`
+	Effort      string `json:"effort"`
+	Model       string `json:"model"`
+	ModelActual string `json:"modelActual"`
+	CtxUsed     int    `json:"ctxUsed"`
+	CtxWindow   int    `json:"ctxWindow"`
+	Cost        float64 `json:"cost"`
 	Theme     string            `json:"theme"`
 	Budget    float64           `json:"budget"`
 	Perm      struct {
@@ -92,6 +97,9 @@ func (s *Server) state() stateDTO {
 	d.Mode = s.app.Mode().String()
 	d.SkipPerms = s.app.SkipPermissions()
 	d.Effort = s.app.Effort()
+	d.Model = s.app.Model()
+	d.ModelActual = s.app.ModelActual()
+	d.CtxUsed, d.CtxWindow = s.app.ContextInfo()
 	d.Cost = s.app.Cost()
 	cfg := s.app.Config()
 	d.Theme = cfg.Theme
@@ -261,6 +269,21 @@ func (s *Server) handleSkipPerms(w http.ResponseWriter, r *http.Request) {
 		"skipPerms": s.app.SkipPermissions(),
 		"mode":      s.app.Mode().String(),
 	})
+}
+
+func (s *Server) handleModel(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Model string `json:"model"`
+	}
+	if err := readJSON(r, &body); err != nil {
+		badRequest(w, "model required")
+		return
+	}
+	if err := s.app.SetModel(body.Model); err != nil {
+		badRequest(w, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, s.state())
 }
 
 func (s *Server) handleEffort(w http.ResponseWriter, r *http.Request) {

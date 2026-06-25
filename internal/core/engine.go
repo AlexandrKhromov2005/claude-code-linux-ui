@@ -77,6 +77,12 @@ type Event struct {
 	CostUSD   float64
 	Attempt   int
 	Err       error
+
+	// Context-window usage from a result event. CtxUsed is the input-side token
+	// count (input + cache read + cache creation), matching Claude Code's
+	// used_percentage formula; CtxWindow is the model's context window size.
+	CtxUsed   int
+	CtxWindow int
 }
 
 // Engine drives Claude Code in headless mode (`claude -p`). It is configured
@@ -114,6 +120,17 @@ type rawEvent struct {
 	Attempt int `json:"attempt"`
 
 	Event json.RawMessage `json:"event"`
+
+	// result-only: token usage and per-model context window
+	Usage struct {
+		InputTokens         int `json:"input_tokens"`
+		CacheCreationTokens int `json:"cache_creation_input_tokens"`
+		CacheReadTokens     int `json:"cache_read_input_tokens"`
+		OutputTokens        int `json:"output_tokens"`
+	} `json:"usage"`
+	ModelUsage map[string]struct {
+		ContextWindow int `json:"contextWindow"`
+	} `json:"modelUsage"`
 }
 
 // streamInner is the relevant slice of a raw Anthropic stream event.
@@ -229,7 +246,19 @@ func (e *Engine) Send(ctx context.Context, prompt, resumeID string) <-chan Event
 					}
 					out <- Event{Kind: EvError, Err: fmt.Errorf("%s", msg)}
 				} else {
-					out <- Event{Kind: EvResult, SessionID: re.SessionID, CostUSD: re.TotalCost, Text: re.Result}
+					ctxUsed := re.Usage.InputTokens + re.Usage.CacheReadTokens + re.Usage.CacheCreationTokens
+					ctxWindow := 0
+					model := re.Model
+					for id, mu := range re.ModelUsage {
+						if mu.ContextWindow > ctxWindow {
+							ctxWindow = mu.ContextWindow
+							model = id
+						}
+					}
+					out <- Event{
+						Kind: EvResult, SessionID: re.SessionID, CostUSD: re.TotalCost,
+						Text: re.Result, Model: model, CtxUsed: ctxUsed, CtxWindow: ctxWindow,
+					}
 				}
 			}
 		}

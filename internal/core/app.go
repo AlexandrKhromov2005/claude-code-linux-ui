@@ -36,6 +36,12 @@ type App struct {
 	// default). Persisted in config.
 	effort string
 
+	// Latest context-window usage and the model actually used, from the most
+	// recent turn's result event (per-session, not persisted).
+	ctxUsed     int
+	ctxWindow   int
+	modelActual string
+
 	cost         float64
 	budgetWarned bool
 }
@@ -103,6 +109,61 @@ func (a *App) Effort() string {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return a.effort
+}
+
+// Model returns the configured model for the active project ("" = CLI default).
+func (a *App) Model() string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.project != nil && a.project.Model != "" {
+		return a.project.Model
+	}
+	return a.cfg.DefaultModel
+}
+
+// ModelActual returns the model id reported by the last turn (e.g. with [1m]).
+func (a *App) ModelActual() string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.modelActual
+}
+
+// ContextInfo returns the last turn's context-window usage and size in tokens.
+func (a *App) ContextInfo() (used, window int) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.ctxUsed, a.ctxWindow
+}
+
+// SetModel sets the model for the active project and the default for new ones,
+// then rewires the engine. An empty value restores the CLI default.
+func (a *App) SetModel(model string) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	model = strings.TrimSpace(model)
+	if a.project != nil {
+		a.project.Model = model
+		_ = a.store.SaveProject(a.project)
+	}
+	a.cfg.DefaultModel = model
+	_ = a.store.SaveConfig(a.cfg)
+	a.configureEngineLocked()
+	return nil
+}
+
+// setContext records the latest context usage and effective model from a turn.
+func (a *App) setContext(used, window int, model string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if window > 0 {
+		a.ctxWindow = window
+	}
+	if used > 0 {
+		a.ctxUsed = used
+	}
+	if model != "" {
+		a.modelActual = model
+	}
 }
 
 // SetEffort persists the reasoning-effort level and rewires the engine. An empty
@@ -260,6 +321,7 @@ func (a *App) openLocked(p *Project) {
 	a.project = p
 	a.mode = ParseMode(p.Mode)
 	a.cost = 0
+	a.ctxUsed = 0
 	a.budgetWarned = false
 	a.configureEngineLocked()
 	a.cfg.LastProject = p.Slug()
@@ -272,6 +334,7 @@ func (a *App) NewThread() {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.thread = a.store.NewThread()
+	a.ctxUsed = 0
 }
 
 // OpenThread loads and activates a thread by id.
@@ -291,6 +354,7 @@ func (a *App) OpenThread(id string) (*Thread, error) {
 	}
 	a.mu.Lock()
 	a.thread = t
+	a.ctxUsed = 0
 	a.mu.Unlock()
 	return t, nil
 }
@@ -412,6 +476,7 @@ func (a *App) SendTurn(ctx context.Context, text string, attachments []string) (
 					final = ev.Text
 				}
 				a.persistAssistant(slug, th, final)
+				a.setContext(ev.CtxUsed, ev.CtxWindow, ev.Model)
 				notice := a.addCost(ev.CostUSD)
 				out <- ev
 				if notice != "" {
