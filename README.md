@@ -17,15 +17,27 @@ package.
   - `chat` — read-only (`Read`, `Grep`, `Glob`); nothing is mutated.
   - `agent` — full toolset; each non-pre-approved action is shown as a diff
     (edits) or command (Bash) and waits for allow / remember+allow / deny.
-- Projects = working directory + config + a memory file + a set of threads.
-  Threads share the project's `cwd` and `CLAUDE.md`.
+- Projects = working directory + config + memory + a set of threads. Threads
+  share the project's `cwd` and `CLAUDE.md`.
+- Cross-thread project memory: after each turn the exchange is folded into a
+  shared per-project memory (a cheap background summary) and injected into every
+  thread, so a fact stated in one thread is known in the others. Editable and
+  toggleable; the manual `memory.md` is merged in too.
 - Persistent history: transcripts and the Claude session id survive restarts;
   threads can be resumed.
-- File and image attachments via a picker or `@path` references.
+- File and image attachments via a picker or `@path` references; web uploads are
+  streamed, so large archives work (cap configurable).
 - Remembered permissions stored per project and passed back to Claude, so an
   approved pattern is not asked again. Deny rules win over allow.
+- Per-project model selection (`opus`, `sonnet`, `haiku`, `opusplan`, `fable`, …
+  via `--model`) and reasoning effort (`low`/`medium`/`high`/`xhigh`/`max`, plus
+  `ultracode`, via `--effort`).
+- Optional `--dangerously-skip-permissions` toggle for agent mode ("act without
+  asking"), off by default and persisted once enabled.
 - History search, thread export to Markdown, themes, and an optional spend
   warning.
+- In the web client header: context-window usage, subscription rate-limit
+  (5-hour / weekly) status, session cost, and pickers for model and effort.
 
 ## Requirements
 
@@ -71,6 +83,17 @@ and point the Go server at it:
     cd web && npm run dev          # Vite on :5173
     CCLU_DEV_SERVER=http://localhost:5173 ./claude-code-linux-ui serve
 
+The web header carries the project and model pickers, an effort selector, the
+chat/agent toggle and a skip-permissions toggle, plus a context-usage bar,
+5-hour / weekly rate-limit chips, and the session cost. Settings (the gear) hold
+the theme, spend limit, thread export, the manual project memory, and the
+cross-thread auto-memory (view / clear / on-off). From the sidebar you can open
+any directory as a project; connecting one opens it in agent mode.
+
+Note: subscription rate-limit chips show the binding window's status and reset
+time only — the headless CLI does not expose a percentage. The context bar
+reflects the context window, not the subscription limit.
+
 ## Modes
 
 `chat` is the default and cannot modify files. Press `Tab` (or `Ctrl+G`, or
@@ -108,14 +131,18 @@ In the approval modal: `a` allow, `r` remember+allow, `d` deny.
   `~/.config/claude-code-linux-ui/`).
 - Data: `$XDG_DATA_HOME/claude-code-linux-ui/` (defaults to
   `~/.local/share/claude-code-linux-ui/`), laid out as
-  `projects/<slug>/{project.toml, memory.md, threads/<id>.json}`.
+  `projects/<slug>/{project.toml, memory.md, auto-memory.md, threads/<id>.json}`.
+  `memory.md` is the manual project memory; `auto-memory.md` is the
+  automatically maintained cross-thread memory; the two are combined into a
+  generated `memory.runtime.md` that is injected into each thread.
 
 Data from the previous `claude-tui` directories is migrated automatically on
 first run when the new location does not exist yet.
 
 `config.toml` keys: `claude_bin`, `default_model`, `default_mode`, `theme`,
-`last_project`, `budget_warn_usd`. Environment overrides: `CLAUDE_BIN`,
-`CLAUDE_TUI_MODEL`.
+`last_project`, `budget_warn_usd`, `effort`, `skip_permissions`,
+`max_upload_mb` (web upload cap, MB; 0 = built-in 1 GiB),
+`auto_memory_disabled`. Environment overrides: `CLAUDE_BIN`, `CLAUDE_TUI_MODEL`.
 
 Other MCP servers configured in Claude Code (`~/.claude.json`, `.mcp.json`) are
 inherited automatically.
