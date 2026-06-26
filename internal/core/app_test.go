@@ -41,7 +41,7 @@ func TestSendTurnPersists(t *testing.T) {
 		t.Fatalf("UseCwd: %v", err)
 	}
 
-	ch, err := app.SendTurn(context.Background(), "hi there", nil)
+	_, ch, err := app.SendTurn(context.Background(), "hi there", nil)
 	if err != nil {
 		t.Fatalf("SendTurn: %v", err)
 	}
@@ -86,7 +86,7 @@ func TestSendTurnPersists(t *testing.T) {
 
 func TestSendTurnNoProject(t *testing.T) {
 	app := newTestApp(t)
-	if _, err := app.SendTurn(context.Background(), "hi", nil); err != ErrNoProject {
+	if _, _, err := app.SendTurn(context.Background(), "hi", nil); err != ErrNoProject {
 		t.Fatalf("expected ErrNoProject, got %v", err)
 	}
 }

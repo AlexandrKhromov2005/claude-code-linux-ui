@@ -481,18 +481,23 @@ func (a *App) SetSkipPermissions(v bool) string {
 
 // ---- turn lifecycle -------------------------------------------------------
 
-// SendTurn persists the user message, spawns a turn and returns a stream of
-// events. Persistence side effects (assistant message, session id, cost) happen
-// in the background against the thread captured at send time.
-func (a *App) SendTurn(ctx context.Context, text string, attachments []string) (<-chan Event, error) {
+// SendTurn persists the user message, spawns a turn and returns the id of the
+// thread the turn is bound to plus a stream of events. Persistence side effects
+// (assistant message, session id, cost) happen in the background against the
+// thread captured at send time, so the turn keeps running and persisting even
+// if the caller switches to another thread or project. The returned thread id
+// lets callers scope live output and cancellation per thread, which is what
+// allows turns in different threads to run concurrently.
+func (a *App) SendTurn(ctx context.Context, text string, attachments []string) (string, <-chan Event, error) {
 	a.mu.Lock()
 	if a.project == nil || a.thread == nil {
 		a.mu.Unlock()
-		return nil, ErrNoProject
+		return "", nil, ErrNoProject
 	}
 	slug := a.project.Slug()
 	cwd := a.project.Cwd
 	th := a.thread
+	threadID := th.ID
 	th.Messages = append(th.Messages, Msg{Role: "user", Content: text, Attachments: attachments, Ts: time.Now()})
 	if th.Title == "" {
 		th.Title = makeTitle(text)
@@ -539,7 +544,7 @@ func (a *App) SendTurn(ctx context.Context, text string, attachments []string) (
 			a.persistAssistant(slug, th, buf.String())
 		}
 	}()
-	return out, nil
+	return threadID, out, nil
 }
 
 func (a *App) setSessionID(slug string, th *Thread, id string) {

@@ -1,6 +1,6 @@
 <script>
   import { onMount, afterUpdate } from 'svelte';
-  import { messages, liveText, streaming, liveTool, onTurnThread } from '../stores/state.js';
+  import { messages, liveText, streaming, liveTool } from '../stores/state.js';
   import { renderMarkdown } from './markdown.js';
 
   let listEl;
@@ -30,7 +30,7 @@
 </script>
 
 <div class="message-list" bind:this={listEl}>
-  {#if $messages.length === 0 && !($streaming && $onTurnThread)}
+  {#if $messages.length === 0 && !$streaming}
     <div class="empty-chat">
       <div class="empty-mark">✦</div>
       <p class="empty-title">Чем займёмся?</p>
@@ -80,7 +80,7 @@
     {/if}
   {/each}
 
-  {#if $streaming && $onTurnThread}
+  {#if $streaming}
     <div class="agent-activity" title="агент выполняет ход">
       <span class="heartbeat"></span>
       <span class="activity-text">
@@ -89,7 +89,7 @@
     </div>
   {/if}
 
-  {#if $streaming && $onTurnThread && $liveText}
+  {#if $streaming && $liveText}
     <div class="msg msg-assistant">
       <div class="msg-meta">
         <span class="role-label accent">claude</span>

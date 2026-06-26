@@ -1,6 +1,6 @@
 <script>
   import { onMount } from 'svelte';
-  import { appState, messages } from '../stores/state.js';
+  import { appState, messages, streamingThreads } from '../stores/state.js';
   import { api } from './api.js';
 
   let projects = [];
@@ -32,11 +32,27 @@
     try { threads = await api.getThreads(); } catch {}
   }
 
+  // syncMessages loads the transcript of the project's current thread, replacing
+  // whatever the previous project left in the message list (otherwise one
+  // project's messages bleed into another's view after a switch).
+  async function syncMessages(state) {
+    messages.set([]);
+    const t = state?.thread;
+    // A freshly created thread has no persisted transcript yet (count 0), so
+    // skip the fetch — it would 400 and the empty list is already correct.
+    if (!t?.id || !t.count) return;
+    try {
+      const thread = await api.openThread(t.id);
+      messages.set(thread.messages || []);
+    } catch {}
+  }
+
   async function openProject(slug) {
     try {
       const state = await api.openProject(slug);
       appState.set(state);
       projectsOpen = false;
+      await syncMessages(state);
       await loadThreads();
     } catch (err) {
       console.error(err);
@@ -53,6 +69,7 @@
       appState.set(state);
       newCwd = '';
       projectsOpen = false;
+      await syncMessages(state);
       await loadProjects();
       await loadThreads();
     } catch (err) {
@@ -207,9 +224,13 @@
         <button
           class="thread-item"
           class:active={$appState?.thread?.id === t.id}
+          class:running={$streamingThreads.has(t.id)}
           on:click={() => openThread(t.id)}
         >
-          <div class="thread-title">{t.title || 'Без названия'}</div>
+          <div class="thread-title">
+            {#if $streamingThreads.has(t.id)}<span class="run-dot" title="идёт ход"></span>{/if}
+            {t.title || 'Без названия'}
+          </div>
           <div class="thread-meta">
             <span class="thread-date">{formatDate(t.updated)}</span>
             <span class="thread-count">{t.count} сообщ.</span>
@@ -453,6 +474,22 @@
     width: 100%;
   }
   .thread-item.active .thread-title { color: var(--accent-strong); font-weight: 500; }
+
+  .run-dot {
+    display: inline-block;
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--green);
+    margin-right: 5px;
+    vertical-align: middle;
+    flex-shrink: 0;
+    animation: run-pulse 1.1s ease-in-out infinite;
+  }
+  @keyframes run-pulse {
+    0%, 100% { opacity: 0.45; transform: scale(0.8); }
+    50%      { opacity: 1; transform: scale(1.1); box-shadow: 0 0 6px var(--green); }
+  }
 
   .thread-meta {
     display: flex;

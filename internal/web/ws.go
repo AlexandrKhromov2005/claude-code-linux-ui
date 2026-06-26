@@ -29,11 +29,16 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		return // upgrader already wrote the error
 	}
-	c := &wsConn{ws: ws, s: s, pending: map[string]chan core.ApprovalDecision{}}
+	c := &wsConn{
+		ws:      ws,
+		s:       s,
+		pending: map[string]chan core.ApprovalDecision{},
+		turns:   map[string]*turnHandle{},
+	}
 	s.setActiveConn(c)
 	defer func() {
 		s.clearActiveConn(c)
-		c.cancelTurn()
+		c.cancelAll()
 		c.failPending()
 		ws.Close()
 	}()
@@ -73,7 +78,17 @@ type wsConn struct {
 
 	mu      sync.Mutex
 	pending map[string]chan core.ApprovalDecision
-	cancel  context.CancelFunc
+	// turns holds the in-flight turn for each thread id, so turns in different
+	// threads run concurrently and can be cancelled independently. A *turnHandle
+	// (not a bare cancel func) so a finishing turn can tell whether it is still
+	// the current one for its thread — func values are not comparable, pointers
+	// are.
+	turns map[string]*turnHandle
+}
+
+// turnHandle owns the cancellation of one in-flight turn.
+type turnHandle struct {
+	cancel context.CancelFunc
 }
 
 type inMsg struct {
@@ -83,6 +98,7 @@ type inMsg struct {
 	ID           string   `json:"id"`
 	Allow        bool     `json:"allow"`
 	RememberRule string   `json:"rememberRule"`
+	ThreadID     string   `json:"threadId"`
 }
 
 func (c *wsConn) writeJSON(v any) error {
@@ -101,7 +117,7 @@ func (c *wsConn) readLoop() {
 		case "send":
 			c.startTurn(m.Text, m.Attachments)
 		case "cancel":
-			c.cancelTurn()
+			c.cancelTurn(m.ThreadID)
 			c.failPending()
 		case "approval":
 			dec := core.ApprovalDecision{Allow: m.Allow, RememberRule: m.RememberRule}
@@ -114,19 +130,22 @@ func (c *wsConn) readLoop() {
 }
 
 func (c *wsConn) startTurn(text string, attachments []string) {
-	c.cancelTurn()
 	ctx, cancel := context.WithCancel(context.Background())
-	c.setCancel(cancel)
-
-	ch, err := c.s.app.SendTurn(ctx, text, attachments)
+	threadID, ch, err := c.s.app.SendTurn(ctx, text, attachments)
 	if err != nil {
 		cancel()
 		_ = c.writeJSON(map[string]any{"type": "error", "message": err.Error()})
 		return
 	}
+	// Register this turn under its thread, replacing only an earlier turn for the
+	// same thread (a re-send). Turns in other threads keep running, which is what
+	// lets the user start a task in one project while another is still working.
+	h := &turnHandle{cancel: cancel}
+	c.registerTurn(threadID, h)
 	go func() {
 		for ev := range ch {
 			m := eventToMsg(ev)
+			m["threadId"] = threadID
 			// The result event carries this turn's cost; the client shows the
 			// running session total, so report the accumulated value instead.
 			// Context usage and the effective model ride along on the same event.
@@ -139,24 +158,53 @@ func (c *wsConn) startTurn(text string, attachments []string) {
 			}
 			_ = c.writeJSON(m)
 		}
-		_ = c.writeJSON(map[string]any{"type": "turn_end"})
+		_ = c.writeJSON(map[string]any{"type": "turn_end", "threadId": threadID})
+		c.finishTurn(threadID, h)
 		cancel()
 	}()
 }
 
-func (c *wsConn) setCancel(cancel context.CancelFunc) {
+// registerTurn records h as the in-flight turn for threadID, cancelling whatever
+// turn was running for that same thread before (a re-send).
+func (c *wsConn) registerTurn(threadID string, h *turnHandle) {
 	c.mu.Lock()
-	c.cancel = cancel
+	old := c.turns[threadID]
+	c.turns[threadID] = h
+	c.mu.Unlock()
+	if old != nil {
+		old.cancel()
+	}
+}
+
+// finishTurn clears h as the in-flight turn for threadID, but only if a newer
+// re-send has not already replaced it.
+func (c *wsConn) finishTurn(threadID string, h *turnHandle) {
+	c.mu.Lock()
+	if c.turns[threadID] == h {
+		delete(c.turns, threadID)
+	}
 	c.mu.Unlock()
 }
 
-func (c *wsConn) cancelTurn() {
+// cancelTurn cancels the in-flight turn for one thread, leaving others running.
+func (c *wsConn) cancelTurn(threadID string) {
 	c.mu.Lock()
-	cancel := c.cancel
-	c.cancel = nil
+	h := c.turns[threadID]
+	delete(c.turns, threadID)
 	c.mu.Unlock()
-	if cancel != nil {
-		cancel()
+	if h != nil {
+		h.cancel()
+	}
+}
+
+// cancelAll cancels every in-flight turn; used when the connection tears down.
+func (c *wsConn) cancelAll() {
+	c.mu.Lock()
+	turns := c.turns
+	c.turns = map[string]*turnHandle{}
+	c.mu.Unlock()
+	for _, h := range turns {
+		h.cancel()
 	}
 }
 

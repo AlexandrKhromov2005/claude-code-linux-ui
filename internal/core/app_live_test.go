@@ -63,7 +63,7 @@ func TestLiveAppAgentTurn(t *testing.T) {
 
 		ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 		defer cancel()
-		ch, err := app.SendTurn(ctx, "Create a file named "+wantFile+" containing the word hi. Use the Write tool.", nil)
+		_, ch, err := app.SendTurn(ctx, "Create a file named "+wantFile+" containing the word hi. Use the Write tool.", nil)
 		if err != nil {
 			t.Fatalf("SendTurn: %v", err)
 		}

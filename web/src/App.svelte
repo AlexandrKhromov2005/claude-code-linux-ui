@@ -4,7 +4,7 @@
 
   import { api } from './lib/api.js';
   import { connectWS } from './lib/ws.js';
-  import { appState, messages, streaming, wsConnected, mode, cost, skipPerms, effort } from './stores/state.js';
+  import { appState, wsConnected, mode, cost, skipPerms, effort } from './stores/state.js';
 
   import Sidebar from './lib/Sidebar.svelte';
   import MessageList from './lib/MessageList.svelte';

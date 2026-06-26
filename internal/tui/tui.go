@@ -919,7 +919,7 @@ func (m *model) commitSystem(s string) {
 func (m *model) startTurn(text string, attachments []string) tea.Cmd {
 	ctx, cancel := context.WithCancel(context.Background())
 	m.cancel = cancel
-	ch, err := m.app.SendTurn(ctx, text, attachments)
+	_, ch, err := m.app.SendTurn(ctx, text, attachments)
 	if err != nil {
 		cancel()
 		return func() tea.Msg { return eventMsg(core.Event{Kind: core.EvError, Err: err}) }
