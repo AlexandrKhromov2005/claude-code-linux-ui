@@ -289,6 +289,10 @@ func (e *Engine) Send(ctx context.Context, prompt, resumeID string) <-chan Event
 					}
 					out <- Event{Kind: EvError, Err: fmt.Errorf("%s", msg)}
 				} else {
+					if debugEnabled() {
+						fmt.Fprintf(os.Stderr, "[cclu] turn usage: input=%d cache_read=%d cache_creation=%d output=%d\n",
+							re.Usage.InputTokens, re.Usage.CacheReadTokens, re.Usage.CacheCreationTokens, re.Usage.OutputTokens)
+					}
 					// Prefer the last assistant call's context; fall back to the
 					// (aggregate) result usage only if no assistant usage was seen.
 					ctxUsed := lastCtx
@@ -321,6 +325,13 @@ func (e *Engine) Send(ctx context.Context, prompt, resumeID string) <-chan Event
 	}()
 
 	return out
+}
+
+// debugEnabled reports whether verbose per-turn diagnostics are on. It is gated
+// by CCLU_DEBUG so it never touches normal output unless explicitly switched on.
+func debugEnabled() bool {
+	v := os.Getenv("CCLU_DEBUG")
+	return v != "" && v != "0" && !strings.EqualFold(v, "false")
 }
 
 // RunOneShot runs a single non-interactive prompt and returns its text result.

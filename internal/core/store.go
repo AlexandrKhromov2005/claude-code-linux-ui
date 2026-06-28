@@ -76,6 +76,12 @@ type Thread struct {
 	Updated         time.Time `json:"updated"`
 	ClaudeSessionID string    `json:"claude_session_id"`
 	Messages        []Msg     `json:"messages"`
+
+	// AutoMemorySeeded records whether this thread's first turn has already
+	// carried the cross-thread auto-memory seed in its outgoing prompt. It latches
+	// once so the seed is sent exactly once per thread (see App.SendTurn); existing
+	// threads from before this field default to false and seed on their next turn.
+	AutoMemorySeeded bool `json:"auto_memory_seeded,omitempty"`
 }
 
 // Store maps the on-disk layout to typed reads and writes.
@@ -149,8 +155,9 @@ func (s *Store) AutoMemoryPath(slug string) string {
 	return filepath.Join(s.projectDir(slug), "auto-memory.md")
 }
 
-// RuntimeMemoryPath returns the combined memory file actually injected into every
-// thread (user memory.md plus auto-memory), rebuilt by RegenRuntimeMemory.
+// RuntimeMemoryPath returns the memory file injected into every turn via
+// --append-system-prompt-file. It mirrors the user-edited memory.md only;
+// auto-memory is seeded per thread instead (see RegenRuntimeMemory).
 func (s *Store) RuntimeMemoryPath(slug string) string {
 	return filepath.Join(s.projectDir(slug), "memory.runtime.md")
 }
@@ -332,30 +339,25 @@ func (s *Store) ReadAutoMemory(slug string) (string, error) {
 	return string(b), err
 }
 
-// WriteAutoMemory replaces the auto-memory file and rebuilds the runtime file.
+// WriteAutoMemory replaces the auto-memory file. It deliberately does not touch
+// the injected runtime file: auto-memory is seeded into a thread's outgoing
+// prompt once at its first turn (see App.SendTurn), not injected through the
+// system prompt, so a background update here never changes what an in-flight
+// thread sends nor the cached system-prompt prefix.
 func (s *Store) WriteAutoMemory(slug, content string) error {
-	if err := writeFileAtomic(s.AutoMemoryPath(slug), []byte(content)); err != nil {
-		return err
-	}
-	return s.RegenRuntimeMemory(slug)
+	return writeFileAtomic(s.AutoMemoryPath(slug), []byte(content))
 }
 
-// RegenRuntimeMemory rebuilds the combined memory file (user memory + auto-memory)
-// that is injected into every thread via --append-system-prompt-file.
+// RegenRuntimeMemory rebuilds the injected memory file from the user-edited
+// memory.md only. Auto-memory is excluded on purpose: it is rewritten after
+// every turn, and folding it in here would change the cached system-prompt prefix
+// each turn, breaking Anthropic prefix caching across the whole resumed
+// transcript. Auto-memory is instead seeded once per thread into the outgoing
+// prompt. This file therefore changes only when the user edits memory.md, so the
+// injected prefix stays byte-identical across a thread's turns.
 func (s *Store) RegenRuntimeMemory(slug string) error {
 	user, _ := s.ReadMemory(slug)
-	auto, _ := s.ReadAutoMemory(slug)
-	var b strings.Builder
-	if strings.TrimSpace(user) != "" {
-		b.WriteString(strings.TrimRight(user, "\n"))
-		b.WriteString("\n\n")
-	}
-	if strings.TrimSpace(auto) != "" {
-		b.WriteString("# Память проекта, накопленная между диалогами\n\n")
-		b.WriteString(strings.TrimRight(auto, "\n"))
-		b.WriteString("\n")
-	}
-	return writeFileAtomic(s.RuntimeMemoryPath(slug), []byte(b.String()))
+	return writeFileAtomic(s.RuntimeMemoryPath(slug), []byte(user))
 }
 
 // WriteMemory replaces the user memory file and rebuilds the runtime file.

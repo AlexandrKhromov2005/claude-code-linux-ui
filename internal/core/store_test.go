@@ -69,13 +69,55 @@ func TestRuntimeMemory(t *testing.T) {
 		t.Fatalf("runtime memory: %v", err)
 	}
 	out := string(b)
-	for _, want := range []string{"Заметка пользователя", "накопленная", "факт один", "факт два"} {
-		if !strings.Contains(out, want) {
-			t.Errorf("runtime memory missing %q in:\n%s", want, out)
+	// The injected file mirrors the user memory only; auto-memory must stay out of
+	// it so the cached system-prompt prefix does not change between turns.
+	if !strings.Contains(out, "Заметка пользователя") {
+		t.Errorf("runtime memory missing user note in:\n%s", out)
+	}
+	for _, leaked := range []string{"факт один", "факт два", "накопленная"} {
+		if strings.Contains(out, leaked) {
+			t.Errorf("auto memory leaked into injected runtime file: %q in:\n%s", leaked, out)
 		}
 	}
 	if got, _ := s.ReadAutoMemory(slug); got != "- факт один\n- факт два" {
 		t.Errorf("auto memory read = %q", got)
+	}
+}
+
+// TestRuntimeMemoryStableUnderAutoUpdate is the cache-stability guard: a
+// background auto-memory update (what runs after every turn) must not change the
+// bytes injected via --append-system-prompt-file, so Anthropic's prefix cache
+// survives across a thread's turns.
+func TestRuntimeMemoryStableUnderAutoUpdate(t *testing.T) {
+	s := newTestStore(t)
+	p, err := s.CreateProject("Mem", "/tmp/mem-stable")
+	if err != nil {
+		t.Fatal(err)
+	}
+	slug := p.Slug()
+	if err := s.WriteMemory(slug, "ручная заметка"); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(s.RuntimeMemoryPath(slug))
+	if err != nil {
+		t.Fatalf("runtime memory: %v", err)
+	}
+	// Two background updates, as would happen across two turns.
+	if err := s.WriteAutoMemory(slug, "- авто-факт один"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.WriteAutoMemory(slug, "- авто-факт один\n- авто-факт два"); err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.ReadFile(s.RuntimeMemoryPath(slug))
+	if err != nil {
+		t.Fatalf("runtime memory: %v", err)
+	}
+	if string(before) != string(after) {
+		t.Fatalf("injected memory changed after auto-memory update:\n before %q\n after  %q", before, after)
+	}
+	if strings.Contains(string(after), "авто-факт") {
+		t.Fatalf("auto memory leaked into injected runtime file:\n%s", after)
 	}
 }
 

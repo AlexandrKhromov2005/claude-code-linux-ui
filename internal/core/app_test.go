@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -32,6 +33,92 @@ func newTestApp(t *testing.T) *App {
 	cfg, _ := store.LoadConfig()
 	engine := &Engine{BinPath: fakeClaude(t), Mode: ModeChat}
 	return NewApp(store, cfg, engine)
+}
+
+// recordingClaude writes its CLI arguments to $ARGS_DUMP for the main streaming
+// turn (identified by the stream-json output format) so a test can inspect the
+// dispatched prompt. Side calls like memory summarization use --output-format
+// json instead; for those it returns an error result and records nothing, so the
+// post-turn updateAutoMemory goroutine cannot clobber the dump or rewrite memory.
+func recordingClaude(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "rec-claude.sh")
+	script := `#!/bin/sh
+stream=0
+for a in "$@"; do
+  [ "$a" = "stream-json" ] && stream=1
+done
+if [ "$stream" = "1" ]; then
+  [ -n "$ARGS_DUMP" ] && printf '%s\n' "$@" > "$ARGS_DUMP"
+  printf '%s\n' '{"type":"system","subtype":"init","session_id":"sess-xyz","model":"test-model"}'
+  printf '%s\n' '{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"Hello world"}}}'
+  printf '%s\n' '{"type":"result","session_id":"sess-xyz","total_cost_usd":0.01,"result":"Hello world"}'
+else
+  printf '%s\n' '{"result":"","is_error":true}'
+fi
+`
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// TestSendTurnSeedsAutoMemoryOnce verifies that the cross-thread auto-memory seed
+// is prepended to the outgoing prompt on a thread's first turn only, that the
+// thread latches as seeded, and that the stored transcript keeps the user's
+// original text without the seed block.
+func TestSendTurnSeedsAutoMemoryOnce(t *testing.T) {
+	store := newTestStore(t)
+	cfg, _ := store.LoadConfig()
+	app := NewApp(store, cfg, &Engine{BinPath: recordingClaude(t), Mode: ModeChat})
+
+	if _, err := app.UseCwd(t.TempDir()); err != nil {
+		t.Fatalf("UseCwd: %v", err)
+	}
+	slug := app.CurrentProject().Slug()
+	if err := store.WriteAutoMemory(slug, "- проект на Go"); err != nil {
+		t.Fatalf("WriteAutoMemory: %v", err)
+	}
+
+	dump := filepath.Join(t.TempDir(), "args.txt")
+	t.Setenv("ARGS_DUMP", dump)
+
+	drain := func(text string) string {
+		_, ch, err := app.SendTurn(context.Background(), text, nil)
+		if err != nil {
+			t.Fatalf("SendTurn: %v", err)
+		}
+		for range ch {
+		}
+		b, err := os.ReadFile(dump)
+		if err != nil {
+			t.Fatalf("read args dump: %v", err)
+		}
+		return string(b)
+	}
+
+	first := drain("привет один")
+	if !strings.Contains(first, "ПАМЯТЬ ПРОЕКТА") || !strings.Contains(first, "проект на Go") {
+		t.Fatalf("first turn prompt missing the memory seed:\n%s", first)
+	}
+	if !strings.Contains(first, "привет один") {
+		t.Fatalf("first turn prompt missing the user text:\n%s", first)
+	}
+	if th := app.CurrentThread(); !th.AutoMemorySeeded {
+		t.Fatalf("thread should latch as seeded after the first turn")
+	}
+	if got := app.CurrentThread().Messages[0].Content; got != "привет один" {
+		t.Fatalf("user message should be stored verbatim, got %q", got)
+	}
+
+	second := drain("привет два")
+	if strings.Contains(second, "ПАМЯТЬ ПРОЕКТА") {
+		t.Fatalf("second turn must not re-seed memory:\n%s", second)
+	}
+	if !strings.Contains(second, "привет два") {
+		t.Fatalf("second turn prompt missing the user text:\n%s", second)
+	}
 }
 
 func TestSendTurnPersists(t *testing.T) {
