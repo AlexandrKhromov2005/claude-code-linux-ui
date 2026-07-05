@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
@@ -37,6 +38,10 @@ type App struct {
 	thread  *Thread
 	mode    Mode
 
+	// researchMCP holds user-configured research MCP servers (mcp.json), loaded
+	// once at startup and merged into agent-mode turns. Empty when unconfigured.
+	researchMCP map[string]json.RawMessage
+
 	// skipPerms enables --dangerously-skip-permissions in agent mode for this
 	// session: tools run with no approval prompt. Off by default, never persisted.
 	skipPerms bool
@@ -59,9 +64,12 @@ type App struct {
 	budgetWarned bool
 }
 
-// NewApp builds an App over a store, config and engine.
+// NewApp builds an App over a store, config and engine. Research MCP servers are
+// loaded best-effort: a malformed mcp.json is skipped rather than failing
+// startup (the load path re-reports the error to callers that surface it).
 func NewApp(store *Store, cfg Config, engine *Engine) *App {
-	return &App{store: store, cfg: cfg, engine: engine, mode: ParseMode(cfg.DefaultMode), skipPerms: cfg.SkipPerms, effort: cfg.Effort}
+	research, _ := store.LoadResearchMCP()
+	return &App{store: store, cfg: cfg, engine: engine, mode: ParseMode(cfg.DefaultMode), skipPerms: cfg.SkipPerms, effort: cfg.Effort, researchMCP: research}
 }
 
 // SetPermission attaches the approval transport used in agent mode.
@@ -278,6 +286,7 @@ func (a *App) configureEngineLocked() {
 	a.engine.PermPromptTool = ""
 	a.engine.MCPConfig = ""
 	a.engine.SkipPermissions = false
+	a.engine.ExtraMCP = a.researchMCP
 	withPerms := false
 	if a.mode == ModeAgent {
 		if a.skipPerms {

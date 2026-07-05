@@ -1,0 +1,28 @@
+{
+  "mcpServers": {
+    "fetch": {
+      "command": "uvx",
+      "args": ["mcp-server-fetch"]
+    },
+    "brave-search": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-brave-search"],
+      "env": { "BRAVE_API_KEY": "ЗАМЕНИ_НА_СВОЙ_КЛЮЧ" }
+    },
+    "tavily": {
+      "command": "npx",
+      "args": ["-y", "tavily-mcp"],
+      "env": { "TAVILY_API_KEY": "ЗАМЕНИ_НА_СВОЙ_КЛЮЧ" }
+    },
+    "exa": {
+      "command": "npx",
+      "args": ["-y", "exa-mcp-server"],
+      "env": { "EXA_API_KEY": "ЗАМЕНИ_НА_СВОЙ_КЛЮЧ" }
+    },
+    "perplexity": {
+      "command": "npx",
+      "args": ["-y", "server-perplexity-ask"],
+      "env": { "PERPLEXITY_API_KEY": "ЗАМЕНИ_НА_СВОЙ_КЛЮЧ" }
+    }
+  }
+}

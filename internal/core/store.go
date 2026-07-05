@@ -147,6 +147,15 @@ func (s *Store) projectDir(slug string) string { return filepath.Join(s.projects
 func (s *Store) threadsDir(slug string) string { return filepath.Join(s.projectDir(slug), "threads") }
 func (s *Store) configPath() string            { return filepath.Join(s.ConfigDir, "config.toml") }
 
+// ResearchMCPPath returns the optional research MCP config file (mcp.json).
+func (s *Store) ResearchMCPPath() string { return filepath.Join(s.ConfigDir, researchMCPFile) }
+
+// LoadResearchMCP reads the user's research MCP servers from mcp.json, returning
+// an empty map when the file is absent.
+func (s *Store) LoadResearchMCP() (map[string]json.RawMessage, error) {
+	return loadResearchMCP(s.ResearchMCPPath())
+}
+
 // MemoryPath returns the project's user-edited memory.md.
 func (s *Store) MemoryPath(slug string) string { return filepath.Join(s.projectDir(slug), "memory.md") }
 

@@ -105,8 +105,13 @@ type Engine struct {
 
 	// Agent-mode wiring, supplied by the permission service.
 	PermPromptTool string // e.g. mcp__permctl__approve
-	MCPConfig      string // inline JSON for --mcp-config
+	MCPConfig      string // inline JSON for --mcp-config (permission server)
 	SettingsJSON   string // inline JSON for --settings (allow/deny rules)
+
+	// ExtraMCP holds user-configured research MCP servers (mcp.json), merged
+	// into the agent-mode --mcp-config alongside the permission server. Their
+	// tools are gated through the same approval modal as any other tool.
+	ExtraMCP map[string]json.RawMessage
 
 	// SkipPermissions runs agent mode with --dangerously-skip-permissions: every
 	// tool is auto-allowed with no approval prompt. Opt-in and dangerous.
@@ -363,22 +368,25 @@ func RunOneShot(ctx context.Context, bin, cwd, model, effort, prompt string) (st
 	return r.Result, nil
 }
 
-// modeArgs returns the tool-policy flags for the engine's current mode.
+// modeArgs returns the tool-policy flags for the engine's current mode. In agent
+// mode it also folds any research MCP servers into the --mcp-config: they ride
+// alongside the permission server, and under --dangerously-skip-permissions they
+// travel on their own (there is no permission server to merge with then).
 func (e *Engine) modeArgs() []string {
-	switch e.Mode {
-	case ModeAgent:
-		if e.SkipPermissions {
-			return []string{"--dangerously-skip-permissions"}
-		}
-		args := []string{"--permission-mode", "default"}
+	if e.Mode != ModeAgent {
+		return []string{"--allowedTools", chatTools, "--permission-mode", "dontAsk"}
+	}
+	var args []string
+	if e.SkipPermissions {
+		args = []string{"--dangerously-skip-permissions"}
+	} else {
+		args = []string{"--permission-mode", "default"}
 		if e.PermPromptTool != "" {
 			args = append(args, "--permission-prompt-tool", e.PermPromptTool)
 		}
-		if e.MCPConfig != "" {
-			args = append(args, "--mcp-config", e.MCPConfig)
-		}
-		return args
-	default:
-		return []string{"--allowedTools", chatTools, "--permission-mode", "dontAsk"}
 	}
+	if cfg := mergeMCPConfig(e.MCPConfig, e.ExtraMCP); cfg != "" {
+		args = append(args, "--mcp-config", cfg)
+	}
+	return args
 }
