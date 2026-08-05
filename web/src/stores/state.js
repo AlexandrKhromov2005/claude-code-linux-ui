@@ -6,6 +6,9 @@ export const messages = writable([]);          // Msg[] for the current thread
 export const pendingApproval = writable(null); // approval_request payload | null
 export const attachments = writable([]);       // { path, name }[] queued for next send
 export const wsConnected = writable(false);
+// Live connectivity health from the server's background probe: VPN tunnel state
+// and, when it is up, the stability of the path to the Anthropic API.
+export const connection = writable({ state: 'checking', detail: 'проверка связи…' });
 
 // liveByThread holds the in-flight turn state for each thread id:
 //   { [threadId]: { streaming: bool, text: string, tool: string } }

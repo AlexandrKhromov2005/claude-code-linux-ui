@@ -4,7 +4,7 @@
 
   import { api } from './lib/api.js';
   import { connectWS } from './lib/ws.js';
-  import { appState, wsConnected, mode, cost, skipPerms, effort } from './stores/state.js';
+  import { appState, wsConnected, mode, cost, skipPerms, effort, connection } from './stores/state.js';
 
   import Sidebar from './lib/Sidebar.svelte';
   import MessageList from './lib/MessageList.svelte';
@@ -111,6 +111,33 @@
     if (!c) return '$0.00';
     return `$${c.toFixed(4)}`;
   }
+
+  // Connection health chip. The server probes the VPN tunnel first and only
+  // then the Anthropic API, so these states map one-to-one to that pipeline.
+  function connLabel(c) {
+    switch (c?.state) {
+      case 'ok': return 'VPN' + (c.latencyMs ? ` ${c.latencyMs}мс` : '');
+      case 'unstable': return 'VPN нестаб.';
+      case 'down': return 'API ✕';
+      case 'vpn_off': return 'VPN выкл';
+      default: return 'связь…';
+    }
+  }
+  function connTitle(c) {
+    if (!c) return '';
+    const head = {
+      ok: 'Связь с Anthropic стабильна',
+      unstable: 'Связь нестабильна',
+      down: 'VPN поднят, но Anthropic API недоступен',
+      vpn_off: 'VPN не поднят — handshake к API не отправляется',
+      checking: 'Проверка связи…',
+    }[c.state] || c.state;
+    let t = head;
+    if (c.vpn) t += ` · туннель: ${c.vpn}`;
+    if (c.latencyMs) t += ` · задержка ${c.latencyMs} мс`;
+    if (c.lossPct) t += ` · потери ${c.lossPct}%`;
+    return t;
+  }
 </script>
 
 <div class="app-shell">
@@ -143,6 +170,16 @@
       </div>
 
       <div class="topbar-right">
+        <span
+          class="conn"
+          class:ok={$connection?.state === 'ok'}
+          class:warn={$connection?.state === 'unstable'}
+          class:down={$connection?.state === 'down' || $connection?.state === 'vpn_off'}
+          title={connTitle($connection)}
+        >
+          <span class="conn-dot"></span>{connLabel($connection)}
+        </span>
+
         {#each limits as l}
           <span class="lim" class:bad={l.status && l.status !== 'allowed'} title={limitTitle(l)}>
             <span class="lim-dot"></span>{limitShort(l.type)}
@@ -376,6 +413,49 @@
     background: var(--red-soft);
     color: var(--red);
     border-color: rgba(226,96,96,0.4);
+  }
+
+  /* Connection/VPN health chip. Grey while checking, then green/amber/red. */
+  .conn {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    height: 30px;
+    padding: 0 10px;
+    font-size: 11px;
+    font-family: var(--mono);
+    border-radius: 999px;
+    background: var(--bg3);
+    color: var(--text-dim);
+    border: 1px solid var(--border);
+    white-space: nowrap;
+  }
+  .conn-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: currentColor;
+  }
+  .conn.ok {
+    background: var(--green-soft);
+    color: var(--green);
+    border-color: rgba(99,194,103,0.30);
+  }
+  .conn.warn {
+    background: rgba(224,168,92,0.15);
+    color: #e0a85c;
+    border-color: rgba(224,168,92,0.4);
+  }
+  .conn.down {
+    background: var(--red-soft);
+    color: var(--red);
+    border-color: rgba(226,96,96,0.4);
+  }
+  .conn.warn .conn-dot { animation: conn-pulse 1.1s ease-in-out infinite; }
+  .conn.down .conn-dot { animation: conn-pulse 1.1s ease-in-out infinite; }
+  @keyframes conn-pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.35; }
   }
 
   .mode-toggle {

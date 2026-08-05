@@ -4,6 +4,7 @@
 package web
 
 import (
+	"context"
 	"fmt"
 	"io/fs"
 	"net"
@@ -34,6 +35,8 @@ type Server struct {
 	upgrader websocket.Upgrader
 	devProxy *httputil.ReverseProxy // non-nil in dev: proxies static to Vite
 
+	health *core.HealthMonitor // background VPN + API connectivity probe
+
 	mu         sync.Mutex
 	activeConn *wsConn
 }
@@ -62,6 +65,15 @@ func New(app *core.App, assets fs.FS) *Server {
 		Subprotocols:     []string{wsSubprotocol},
 		CheckOrigin:      func(r *http.Request) bool { return s.allow.checkHostOrigin(r) == "" },
 	}
+	s.health = core.NewHealthMonitor()
+	s.health.SetOnUpdate(func(st core.ConnStatus) {
+		s.mu.Lock()
+		c := s.activeConn
+		s.mu.Unlock()
+		if c != nil {
+			_ = c.writeJSON(map[string]any{"type": "connection", "status": st})
+		}
+	})
 	return s
 }
 
@@ -107,6 +119,11 @@ func (s *Server) URL() string {
 
 // Serve runs until the listener is closed.
 func (s *Server) Serve() error {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if s.health != nil {
+		go s.health.Run(ctx)
+	}
 	srv := &http.Server{Handler: s.Handler(), ReadHeaderTimeout: 10 * time.Second}
 	return srv.Serve(s.ln)
 }

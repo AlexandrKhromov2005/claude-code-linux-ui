@@ -1,6 +1,6 @@
 import { api } from './api.js';
 import {
-  appState, messages, liveByThread, pendingApproval, wsConnected,
+  appState, messages, liveByThread, pendingApproval, wsConnected, connection,
   setLive, appendLiveText, clearLive, liveFor,
 } from '../stores/state.js';
 import { get } from 'svelte/store';
@@ -24,6 +24,10 @@ export function connectWS() {
 
   ws.addEventListener('open', () => {
     wsConnected.set(true);
+    // A fresh socket cannot resume a turn that was streaming to a previous
+    // connection, so any leftover "streaming" slice is stale. Clear it so the
+    // composer never stays locked behind a ghost spinner after a reconnect.
+    liveByThread.set({});
   });
 
   ws.addEventListener('close', () => {
@@ -46,7 +50,9 @@ export function connectWS() {
   sendFn = (obj) => {
     if (ws && ws.readyState === WebSocket.OPEN) {
       ws.send(JSON.stringify(obj));
+      return true;
     }
+    return false;
   };
 }
 
@@ -54,6 +60,12 @@ function handleMessage(msg) {
   switch (msg.type) {
     case 'state':
       appState.set(msg.state);
+      if (msg.state?.connection) connection.set(msg.state.connection);
+      break;
+
+    case 'connection':
+      // Live VPN/API health push from the server's background probe.
+      if (msg.status) connection.set(msg.status);
       break;
 
     case 'event':
@@ -176,6 +188,16 @@ function handleTurnError(threadId, text) {
 export function sendMessage(text, attachmentPaths) {
   const threadId = get(appState)?.thread?.id;
   if (!threadId) return; // no open thread to attach the turn to
+  // Transmit first: if the socket is down the send is dropped, and faking a
+  // spinner + user message here would lock the composer behind a turn that was
+  // never dispatched. Surface the failure instead of swallowing it.
+  if (!sendFn?.({ type: 'send', text, attachments: attachmentPaths })) {
+    messages.update(ms => [
+      ...ms,
+      { role: 'system', content: 'Нет соединения с сервером — сообщение не отправлено. Обновите страницу.', ts: new Date().toISOString() },
+    ]);
+    return;
+  }
   // Bind this turn's live state to the thread it is sent from, so its output
   // renders only there even if the user switches threads mid-turn.
   setLive(threadId, { streaming: true, text: '', tool: '' });
@@ -184,7 +206,6 @@ export function sendMessage(text, attachmentPaths) {
     ...ms,
     { role: 'user', content: text, attachments: attachmentPaths, ts: new Date().toISOString() },
   ]);
-  sendFn?.({ type: 'send', text, attachments: attachmentPaths });
 }
 
 export function cancelTurn() {

@@ -59,23 +59,24 @@ type threadSummaryDTO struct {
 }
 
 type stateDTO struct {
-	Project   *projectDTO       `json:"project"`
-	Thread    *threadSummaryDTO `json:"thread"`
-	Mode        string `json:"mode"`
-	SkipPerms   bool   `json:"skipPerms"`
-	Effort      string `json:"effort"`
-	Model       string `json:"model"`
-	ModelActual string `json:"modelActual"`
-	CtxUsed     int             `json:"ctxUsed"`
-	CtxWindow   int             `json:"ctxWindow"`
-	Limits      []core.RateLimit `json:"limits"`
-	Cost        float64         `json:"cost"`
-	Theme     string            `json:"theme"`
-	Budget    float64           `json:"budget"`
-	Perm      struct {
+	Project     *projectDTO       `json:"project"`
+	Thread      *threadSummaryDTO `json:"thread"`
+	Mode        string            `json:"mode"`
+	SkipPerms   bool              `json:"skipPerms"`
+	Effort      string            `json:"effort"`
+	Model       string            `json:"model"`
+	ModelActual string            `json:"modelActual"`
+	CtxUsed     int               `json:"ctxUsed"`
+	CtxWindow   int               `json:"ctxWindow"`
+	Limits      []core.RateLimit  `json:"limits"`
+	Cost        float64           `json:"cost"`
+	Theme       string            `json:"theme"`
+	Budget      float64           `json:"budget"`
+	Perm        struct {
 		OK   bool   `json:"ok"`
 		Addr string `json:"addr"`
 	} `json:"perm"`
+	Connection core.ConnStatus `json:"connection"`
 }
 
 func projectToDTO(p *core.Project) *projectDTO {
@@ -110,6 +111,9 @@ func (s *Server) state() stateDTO {
 	addr, ok := s.app.PermissionInfo()
 	d.Perm.OK = ok
 	d.Perm.Addr = addr
+	if s.health != nil {
+		d.Connection = s.health.Status()
+	}
 	return d
 }
 
