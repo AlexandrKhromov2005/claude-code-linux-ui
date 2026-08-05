@@ -43,6 +43,7 @@ export const api = {
   openThread: (id) => post('/api/threads/open', { id }),
   newThread: () => post('/api/threads/new', {}),
   deleteThread: (id) => post('/api/threads/delete', { id }),
+  handoffThread: () => post('/api/threads/handoff', {}),
 
   search: (q) => get(`/api/search?q=${encodeURIComponent(q)}`),
 

@@ -27,6 +27,7 @@ func (s *Server) registerAPI(mux *http.ServeMux) {
 	mux.HandleFunc("/api/threads/open", s.guard(s.handleThreadOpen))
 	mux.HandleFunc("/api/threads/new", s.guard(s.handleThreadNew))
 	mux.HandleFunc("/api/threads/delete", s.guard(s.handleThreadDelete))
+	mux.HandleFunc("/api/threads/handoff", s.guard(s.handleThreadHandoff))
 	mux.HandleFunc("/api/search", s.guard(s.handleSearch))
 	mux.HandleFunc("/api/mode", s.guard(s.handleMode))
 	mux.HandleFunc("/api/permissions/skip", s.guard(s.handleSkipPerms))
@@ -245,6 +246,17 @@ func (s *Server) handleThreadDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
+// handleThreadHandoff summarises the open thread and continues it in a fresh one
+// whose context starts from that summary instead of the full transcript.
+func (s *Server) handleThreadHandoff(w http.ResponseWriter, r *http.Request) {
+	res, err := s.app.HandoffThread(r.Context())
+	if err != nil {
+		badRequest(w, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"handoff": res, "state": s.state()})
 }
 
 func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {

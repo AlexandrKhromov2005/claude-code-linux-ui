@@ -94,6 +94,124 @@
     return lines.join('\n');
   }
 
+  // ---- thread handoff -----------------------------------------------------
+  // Offered once the context is filling up, because that is the point where
+  // resending the transcript starts to dominate the cost of a turn.
+  const HANDOFF_SUGGEST_PCT = 55;
+  let handoffBusy = false;
+  let handoffError = '';
+
+  $: canHandoff = !!$appState?.thread?.count && !$streaming;
+  $: suggestHandoff = canHandoff && ctxPct >= HANDOFF_SUGGEST_PCT;
+
+  async function doHandoff() {
+    if (handoffBusy || !canHandoff) return;
+    handoffBusy = true;
+    handoffError = '';
+    try {
+      const res = await api.handoffThread();
+      appState.set(res.state);
+      messages.set([
+        {
+          role: 'system',
+          content: 'Тред продолжен с чистым контекстом. Перенесённая сводка:\n\n' + res.handoff.summary,
+          ts: new Date().toISOString(),
+        },
+      ]);
+    } catch (err) {
+      handoffError = String(err?.message || err);
+    } finally {
+      handoffBusy = false;
+    }
+  }
+
+  function fmtTokens(n) {
+    if (n >= 1e6) return (n / 1e6).toFixed(n >= 1e7 ? 0 : 1) + 'M';
+    if (n >= 1e3) return Math.round(n / 1e3) + 'k';
+    return String(n);
+  }
+
+  // Subscription rate limits (5-hour / weekly). Headless exposes status + reset
+  // time, not a percentage.
+  $: limits = $appState?.limits ?? [];
+  function limitShort(t) {
+    return t === 'five_hour' ? '5ч' : t === 'seven_day' ? 'нед' : t;
+  }
+  function limitFull(t) {
+    return t === 'five_hour' ? '5-часовой лимит' : t === 'seven_day' ? 'недельный лимит' : t;
+  }
+  function fmtReset(ts) {
+    if (!ts) return '';
+    try {
+      return new Date(ts * 1000).toLocaleString('ru-RU', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
+    } catch { return ''; }
+  }
+  function limitTitle(l) {
+    const status = l.status === 'allowed' ? 'в норме' : (l.status || '?');
+    const reset = l.resetsAt ? ` · сброс: ${fmtReset(l.resetsAt)}` : '';
+    return `${limitFull(l.type)} · ${status}${reset}`;
+  }
+
+  onMount(async () => {
+    try {
+      const state = await api.getState();
+      appState.set(state);
+    } catch (err) {
+      console.error('Failed to load state:', err);
+    }
+    connectWS();
+  });
+
+  async function toggleMode() {
+    const next = $mode === 'chat' ? 'agent' : 'chat';
+    try {
+      const res = await api.setMode(next);
+      appState.update(s => s ? { ...s, mode: res.mode } : s);
+      modeWarning = res.warning || '';
+    } catch {}
+  }
+
+  async function toggleSkip() {
+    try {
+      const res = await api.setSkipPerms(!$skipPerms);
+      appState.update(s => s ? { ...s, skipPerms: res.skipPerms, mode: res.mode ?? s.mode } : s);
+      modeWarning = res.warning || '';
+    } catch {}
+  }
+
+  function dismissWarning() { modeWarning = ''; }
+
+  function formatCost(c) {
+    if (!c) return '$0.00';
+    return `$${c.toFixed(4)}`;
+  }
+
+  // Connection health chip. The server probes the VPN tunnel first and only
+  // then the Anthropic API, so these states map one-to-one to that pipeline.
+  function connLabel(c) {
+    switch (c?.state) {
+      case 'ok': return 'VPN' + (c.latencyMs ? ` ${c.latencyMs}мс` : '');
+      case 'unstable': return 'VPN нестаб.';
+      case 'down': return 'API ✕';
+      case 'vpn_off': return 'VPN выкл';
+      default: return 'связь…';
+    }
+  }
+  function connTitle(c) {
+    if (!c) return '';
+    const head = {
+      ok: 'Связь с Anthropic стабильна',
+      unstable: 'Связь нестабильна',
+      down: 'VPN поднят, но Anthropic API недоступен',
+      vpn_off: 'VPN не поднят — handshake к API не отправляется',
+      checking: 'Проверка связи…',
+    }[c.state] || c.state;
+    let t = head;
+    if (c.vpn) t += ` · туннель: ${c.vpn}`;
+    if (c.latencyMs) t += ` · задержка ${c.latencyMs} мс`;
+    if (c.lossPct) t += ` · потери ${c.lossPct}%`;
+    return t;
+  }
 </script>
 
 <div class="app-shell">
@@ -154,6 +272,20 @@
           </div>
         {/if}
 
+        <!-- Continue in a fresh thread: the transcript is replayed on every
+             turn, so a filling context is the moment this starts to pay off. -->
+        {#if canHandoff}
+          <button
+            class="handoff"
+            class:suggest={suggestHandoff}
+            on:click={doHandoff}
+            disabled={handoffBusy}
+            title={'Продолжить в новом треде: текущий диалог сворачивается в краткую сводку, '
+              + 'и следующий ход отправляет её вместо всей истории. Старый тред остаётся на месте.'}
+          >
+            {handoffBusy ? 'сворачиваю…' : '⤳ новый контекст'}
+          </button>
+        {/if}
 
         {#if sessionTokens > 0}
           <span
@@ -219,6 +351,12 @@
       </div>
     {/if}
 
+    {#if handoffError}
+      <div class="warning-bar">
+        <span>Не удалось перенести тред: {handoffError}</span>
+        <button class="dismiss-btn" on:click={() => (handoffError = '')}>x</button>
+      </div>
+    {/if}
 
     <MessageList />
     <Composer />
@@ -447,6 +585,32 @@
     border-color: rgba(224,168,92,0.4);
   }
 
+  /* Fold the thread into a summary and continue with a clean context. */
+  .handoff {
+    height: 30px;
+    padding: 0 10px;
+    font-size: 11px;
+    font-family: var(--mono);
+    border-radius: 999px;
+    background: var(--bg3);
+    color: var(--text-dim);
+    border: 1px solid var(--border);
+    cursor: pointer;
+    white-space: nowrap;
+    transition: background 0.15s, color 0.15s, border-color 0.15s;
+  }
+  .handoff:hover:not(:disabled) {
+    color: var(--text);
+    border-color: var(--border-strong, var(--border));
+  }
+  .handoff:disabled { opacity: 0.6; cursor: default; }
+  /* Once the window is filling up, resending the transcript dominates the cost
+     of a turn, so the control stops being decoration and starts being advice. */
+  .handoff.suggest {
+    background: rgba(224,168,92,0.15);
+    color: #e0a85c;
+    border-color: rgba(224,168,92,0.4);
+  }
 
   .mode-toggle {
     font-size: 12px;
