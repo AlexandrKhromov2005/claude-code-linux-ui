@@ -32,6 +32,28 @@
     try { threads = await api.getThreads(); } catch {}
   }
 
+  // A thread's lifetime cost. Every turn resends the transcript, so this grows
+  // faster than message count does — showing it is what makes an expensive
+  // thread recognisable before it is reopened.
+  function formatCost(c) {
+    if (!c) return '';
+    return c < 0.01 ? '<$0.01' : `$${c.toFixed(2)}`;
+  }
+
+  function fmtTokens(n) {
+    if (!n) return '0';
+    if (n >= 1e6) return (n / 1e6).toFixed(1) + 'M';
+    if (n >= 1e3) return Math.round(n / 1e3) + 'k';
+    return String(n);
+  }
+
+  function threadCostTitle(t) {
+    const u = t.usage || {};
+    const input = (u.input ?? 0) + (u.cacheRead ?? 0) + (u.cacheCreate ?? 0);
+    return `За всё время треда: $${(t.cost ?? 0).toFixed(4)}\n`
+      + `вход ${fmtTokens(input)} (из кэша ${fmtTokens(u.cacheRead ?? 0)}), выход ${fmtTokens(u.output ?? 0)}`;
+  }
+
   // syncMessages loads the transcript of the project's current thread, replacing
   // whatever the previous project left in the message list (otherwise one
   // project's messages bleed into another's view after a switch).
@@ -234,6 +256,9 @@
           <div class="thread-meta">
             <span class="thread-date">{formatDate(t.updated)}</span>
             <span class="thread-count">{t.count} сообщ.</span>
+            {#if t.cost > 0}
+              <span class="thread-cost" title={threadCostTitle(t)}>{formatCost(t.cost)}</span>
+            {/if}
             <button
               class="thread-delete"
               on:click={(e) => deleteThread(t.id, e)}
@@ -498,9 +523,13 @@
     width: 100%;
   }
 
-  .thread-date, .thread-count {
+  .thread-date, .thread-count, .thread-cost {
     font-size: 11px;
     color: var(--text-dim);
+  }
+  .thread-cost {
+    font-family: var(--mono);
+    opacity: 0.8;
   }
 
   .thread-delete {

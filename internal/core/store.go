@@ -82,6 +82,18 @@ type Thread struct {
 	// once so the seed is sent exactly once per thread (see App.SendTurn); existing
 	// threads from before this field default to false and seed on their next turn.
 	AutoMemorySeeded bool `json:"auto_memory_seeded,omitempty"`
+
+	// Usage and CostUSD accumulate what this thread has spent across its whole
+	// life, including previous runs of the app. Every turn resends the transcript,
+	// so a thread's cost grows with its length — recording it per thread is what
+	// makes that visible, and what lets the client suggest a handoff before a
+	// transcript gets expensive to carry.
+	Usage   TokenUsage `json:"usage,omitzero"`
+	CostUSD float64    `json:"cost_usd,omitempty"`
+
+	// ContinuedFrom links a thread to the one it was handed off from, so a
+	// compacted chain stays traceable back through its summaries.
+	ContinuedFrom string `json:"continued_from,omitempty"`
 }
 
 // Store maps the on-disk layout to typed reads and writes.

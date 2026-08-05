@@ -155,6 +155,8 @@ func (c *wsConn) startTurn(text string, attachments []string) {
 				m["ctxUsed"] = used
 				m["ctxWindow"] = win
 				m["modelActual"] = c.s.app.ModelActual()
+				m["usage"] = c.s.app.Usage()
+				m["turnUsage"] = ev.Usage
 			}
 			_ = c.writeJSON(m)
 		}

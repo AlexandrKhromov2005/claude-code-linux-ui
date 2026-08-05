@@ -39,7 +39,7 @@ func newTestApp(t *testing.T) *App {
 // turn (identified by the stream-json output format) so a test can inspect the
 // dispatched prompt. Side calls like memory summarization use --output-format
 // json instead; for those it returns an error result and records nothing, so the
-// post-turn updateAutoMemory goroutine cannot clobber the dump or rewrite memory.
+// post-turn memory upkeep cannot clobber the dump or rewrite memory.
 func recordingClaude(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()

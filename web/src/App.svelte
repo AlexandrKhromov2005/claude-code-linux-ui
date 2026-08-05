@@ -4,7 +4,7 @@
 
   import { api } from './lib/api.js';
   import { connectWS } from './lib/ws.js';
-  import { appState, wsConnected, mode, cost, skipPerms, effort, connection } from './stores/state.js';
+  import { appState, messages, wsConnected, mode, cost, skipPerms, effort, connection, usage, streaming } from './stores/state.js';
 
   import Sidebar from './lib/Sidebar.svelte';
   import MessageList from './lib/MessageList.svelte';
@@ -51,93 +51,49 @@
   $: ctxPct = ctxWindow > 0 ? Math.min(100, (ctxUsed / ctxWindow) * 100) : 0;
   $: ctxLeft = Math.max(0, 100 - ctxPct);
 
-  function fmtTokens(n) {
-    if (n >= 1e6) return (n / 1e6).toFixed(n >= 1e7 ? 0 : 1) + 'M';
-    if (n >= 1e3) return Math.round(n / 1e3) + 'k';
-    return String(n);
-  }
+  // ---- token usage --------------------------------------------------------
+  // Every turn resends the whole thread, so a long conversation costs more per
+  // turn than a short one. These numbers exist so that growth is visible before
+  // it shows up on the bill.
+  const ZERO_USAGE = { input: 0, cacheRead: 0, cacheCreate: 0, output: 0 };
+  $: turnsUsage = $usage?.turns ?? ZERO_USAGE;
+  $: sideUsage = $usage?.side ?? ZERO_USAGE;
 
-  // Subscription rate limits (5-hour / weekly). Headless exposes status + reset
-  // time, not a percentage.
-  $: limits = $appState?.limits ?? [];
-  function limitShort(t) {
-    return t === 'five_hour' ? '5ч' : t === 'seven_day' ? 'нед' : t;
+  function inputTokens(u) {
+    return (u?.input ?? 0) + (u?.cacheRead ?? 0) + (u?.cacheCreate ?? 0);
   }
-  function limitFull(t) {
-    return t === 'five_hour' ? '5-часовой лимит' : t === 'seven_day' ? 'недельный лимит' : t;
+  function allTokens(u) {
+    return inputTokens(u) + (u?.output ?? 0);
   }
-  function fmtReset(ts) {
-    if (!ts) return '';
-    try {
-      return new Date(ts * 1000).toLocaleString('ru-RU', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
-    } catch { return ''; }
-  }
-  function limitTitle(l) {
-    const status = l.status === 'allowed' ? 'в норме' : (l.status || '?');
-    const reset = l.resetsAt ? ` · сброс: ${fmtReset(l.resetsAt)}` : '';
-    return `${limitFull(l.type)} · ${status}${reset}`;
-  }
+  $: sessionTokens = allTokens(turnsUsage) + allTokens(sideUsage);
 
-  onMount(async () => {
-    try {
-      const state = await api.getState();
-      appState.set(state);
-    } catch (err) {
-      console.error('Failed to load state:', err);
+  // Share of input tokens served from cache. A healthy resumed thread sits well
+  // above 90%; a sustained drop means the cached prefix is being invalidated and
+  // the whole transcript is being re-read at full price every turn.
+  $: cacheHit = (() => {
+    const total = inputTokens(turnsUsage);
+    if (!total) return null;
+    return Math.round(((turnsUsage.cacheRead ?? 0) / total) * 100);
+  })();
+
+  function usageTitle() {
+    const lines = [
+      `Токены за сессию: ${fmtTokens(sessionTokens)}`,
+      `  диалог — вход ${fmtTokens(inputTokens(turnsUsage))}, выход ${fmtTokens(turnsUsage.output ?? 0)}`,
+      `  служебное (память, сводки) — ${fmtTokens(allTokens(sideUsage))}`,
+    ];
+    if (cacheHit !== null) {
+      lines.push(
+        '',
+        `Из кэша: ${cacheHit}% входных токенов`,
+        cacheHit >= 85
+          ? 'Кэш работает — история треда переиспользуется.'
+          : 'Низкий процент кэша: история треда пересылается заново.',
+      );
     }
-    connectWS();
-  });
-
-  async function toggleMode() {
-    const next = $mode === 'chat' ? 'agent' : 'chat';
-    try {
-      const res = await api.setMode(next);
-      appState.update(s => s ? { ...s, mode: res.mode } : s);
-      modeWarning = res.warning || '';
-    } catch {}
+    return lines.join('\n');
   }
 
-  async function toggleSkip() {
-    try {
-      const res = await api.setSkipPerms(!$skipPerms);
-      appState.update(s => s ? { ...s, skipPerms: res.skipPerms, mode: res.mode ?? s.mode } : s);
-      modeWarning = res.warning || '';
-    } catch {}
-  }
-
-  function dismissWarning() { modeWarning = ''; }
-
-  function formatCost(c) {
-    if (!c) return '$0.00';
-    return `$${c.toFixed(4)}`;
-  }
-
-  // Connection health chip. The server probes the VPN tunnel first and only
-  // then the Anthropic API, so these states map one-to-one to that pipeline.
-  function connLabel(c) {
-    switch (c?.state) {
-      case 'ok': return 'VPN' + (c.latencyMs ? ` ${c.latencyMs}мс` : '');
-      case 'unstable': return 'VPN нестаб.';
-      case 'down': return 'API ✕';
-      case 'vpn_off': return 'VPN выкл';
-      default: return 'связь…';
-    }
-  }
-  function connTitle(c) {
-    if (!c) return '';
-    const head = {
-      ok: 'Связь с Anthropic стабильна',
-      unstable: 'Связь нестабильна',
-      down: 'VPN поднят, но Anthropic API недоступен',
-      vpn_off: 'VPN не поднят — handshake к API не отправляется',
-      checking: 'Проверка связи…',
-    }[c.state] || c.state;
-    let t = head;
-    if (c.vpn) t += ` · туннель: ${c.vpn}`;
-    if (c.latencyMs) t += ` · задержка ${c.latencyMs} мс`;
-    if (c.lossPct) t += ` · потери ${c.lossPct}%`;
-    return t;
-  }
 </script>
 
 <div class="app-shell">
@@ -198,6 +154,17 @@
           </div>
         {/if}
 
+
+        {#if sessionTokens > 0}
+          <span
+            class="usage"
+            class:warn={cacheHit !== null && cacheHit < 60}
+            title={usageTitle()}
+          >
+            {fmtTokens(sessionTokens)}{#if cacheHit !== null}<span class="usage-cache"> · кэш {cacheHit}%</span>{/if}
+          </span>
+        {/if}
+
         <span class="meta-item cost" class:positive={$cost > 0}>{formatCost($cost)}</span>
 
         <!-- Effort level -->
@@ -251,6 +218,7 @@
         <button class="dismiss-btn" on:click={dismissWarning}>x</button>
       </div>
     {/if}
+
 
     <MessageList />
     <Composer />
@@ -457,6 +425,28 @@
     0%, 100% { opacity: 1; }
     50% { opacity: 0.35; }
   }
+
+  /* Session token counter with the prompt-cache hit rate. */
+  .usage {
+    display: inline-flex;
+    align-items: center;
+    height: 30px;
+    padding: 0 10px;
+    font-size: 11px;
+    font-family: var(--mono);
+    border-radius: 999px;
+    background: var(--bg3);
+    color: var(--text-dim);
+    border: 1px solid var(--border);
+    white-space: nowrap;
+  }
+  .usage-cache { opacity: 0.75; }
+  .usage.warn {
+    background: rgba(224,168,92,0.15);
+    color: #e0a85c;
+    border-color: rgba(224,168,92,0.4);
+  }
+
 
   .mode-toggle {
     font-size: 12px;

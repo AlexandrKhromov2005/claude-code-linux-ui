@@ -56,6 +56,12 @@ type threadSummaryDTO struct {
 	Updated   time.Time `json:"updated"`
 	Count     int       `json:"count"`
 	SessionID string    `json:"sessionId"`
+
+	// Usage and Cost are this thread's lifetime totals. Every turn resends the
+	// transcript, so they grow with thread length — surfacing them is what lets
+	// the user see which conversations have become expensive to continue.
+	Usage core.TokenUsage `json:"usage"`
+	Cost  float64         `json:"cost"`
 }
 
 type stateDTO struct {
@@ -70,6 +76,7 @@ type stateDTO struct {
 	CtxWindow   int               `json:"ctxWindow"`
 	Limits      []core.RateLimit  `json:"limits"`
 	Cost        float64           `json:"cost"`
+	Usage       core.SessionUsage `json:"usage"`
 	Theme       string            `json:"theme"`
 	Budget      float64           `json:"budget"`
 	Perm        struct {
@@ -90,7 +97,10 @@ func threadSummary(t *core.Thread) *threadSummaryDTO {
 	if t == nil {
 		return nil
 	}
-	return &threadSummaryDTO{ID: t.ID, Title: t.Title, Updated: t.Updated, Count: len(t.Messages), SessionID: t.ClaudeSessionID}
+	return &threadSummaryDTO{
+		ID: t.ID, Title: t.Title, Updated: t.Updated, Count: len(t.Messages),
+		SessionID: t.ClaudeSessionID, Usage: t.Usage, Cost: t.CostUSD,
+	}
 }
 
 func (s *Server) state() stateDTO {
@@ -105,6 +115,7 @@ func (s *Server) state() stateDTO {
 	d.CtxUsed, d.CtxWindow = s.app.ContextInfo()
 	d.Limits = s.app.Limits()
 	d.Cost = s.app.Cost()
+	d.Usage = s.app.Usage()
 	cfg := s.app.Config()
 	d.Theme = cfg.Theme
 	d.Budget = cfg.BudgetWarnUSD

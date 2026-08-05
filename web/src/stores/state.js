@@ -9,6 +9,9 @@ export const wsConnected = writable(false);
 // Live connectivity health from the server's background probe: VPN tunnel state
 // and, when it is up, the stability of the path to the Anthropic API.
 export const connection = writable({ state: 'checking', detail: 'проверка связи…' });
+// Token usage of the most recent turn, pushed on its result event. Kept apart
+// from appState because it describes one turn, not the session.
+export const lastTurnUsage = writable(null);
 
 // liveByThread holds the in-flight turn state for each thread id:
 //   { [threadId]: { streaming: bool, text: string, tool: string } }
@@ -58,6 +61,11 @@ export const mode = derived(appState, $s => $s?.mode ?? 'chat');
 export const skipPerms = derived(appState, $s => $s?.skipPerms ?? false);
 export const effort = derived(appState, $s => $s?.effort ?? '');
 export const cost = derived(appState, $s => $s?.cost ?? 0);
+
+// Session token usage, split into conversation turns and the app's own
+// background upkeep (memory, summaries).
+const EMPTY_USAGE = { input: 0, cacheRead: 0, cacheCreate: 0, output: 0 };
+export const usage = derived(appState, $s => $s?.usage ?? { turns: EMPTY_USAGE, side: EMPTY_USAGE });
 
 // Current-thread live state. The composer locks and the message list streams
 // based on these, so only the thread whose turn is running is affected.

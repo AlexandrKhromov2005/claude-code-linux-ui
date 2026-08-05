@@ -1,7 +1,7 @@
 import { api } from './api.js';
 import {
   appState, messages, liveByThread, pendingApproval, wsConnected, connection,
-  setLive, appendLiveText, clearLive, liveFor,
+  lastTurnUsage, setLive, appendLiveText, clearLive, liveFor,
 } from '../stores/state.js';
 import { get } from 'svelte/store';
 
@@ -130,14 +130,16 @@ function handleEvent(msg) {
 
     case 'result':
       setLive(tid, { tool: '' });
-      // Cost/context/model are session-global; update regardless of thread.
+      // Cost/context/model/usage are session-global; update regardless of thread.
       appState.update(s => s ? {
         ...s,
         cost: msg.cost ?? s.cost,
         ctxUsed: msg.ctxUsed ?? s.ctxUsed,
         ctxWindow: msg.ctxWindow ?? s.ctxWindow,
         modelActual: msg.modelActual ?? s.modelActual,
+        usage: msg.usage ?? s.usage,
       } : s);
+      if (msg.turnUsage) lastTurnUsage.set(msg.turnUsage);
       break;
 
     case 'retry':

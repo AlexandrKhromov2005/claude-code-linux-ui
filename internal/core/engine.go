@@ -2,6 +2,7 @@ package core
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -85,6 +86,11 @@ type Event struct {
 	CtxUsed   int
 	CtxWindow int
 
+	// Usage is what the turn actually billed, summed over every tool iteration.
+	// It is the accounting view (how many tokens this turn cost), as opposed to
+	// CtxUsed above, which is the live context view (how full the window is).
+	Usage TokenUsage
+
 	// Subscription rate-limit status from a rate_limit_event. The headless CLI
 	// reports the binding limit's type, reset time and status (no percentage).
 	LimitType   string // "five_hour" | "seven_day"
@@ -116,7 +122,14 @@ type Engine struct {
 	// SkipPermissions runs agent mode with --dangerously-skip-permissions: every
 	// tool is auto-allowed with no approval prompt. Opt-in and dangerous.
 	SkipPermissions bool
+
+	// FallbackModel is passed to --fallback-model so an overloaded primary model
+	// degrades to a working one instead of failing the turn ("" = no fallback).
+	FallbackModel string
 }
+
+// caps returns the installed CLI's optional-flag support (probed once per binary).
+func (e *Engine) caps() CLICaps { return DetectCLICaps(e.BinPath) }
 
 // rawEvent is a permissive view of one NDJSON line from --output-format stream-json.
 type rawEvent struct {
@@ -180,31 +193,10 @@ type streamInner struct {
 func (e *Engine) Send(ctx context.Context, prompt, resumeID string) <-chan Event {
 	out := make(chan Event, 128)
 
-	args := []string{
-		"-p", prompt,
-		"--output-format", "stream-json",
-		"--verbose",
-		"--include-partial-messages",
+	args := e.turnArgs(prompt, resumeID, e.caps())
+	if debugEnabled() {
+		fmt.Fprintf(os.Stderr, "[cclu] turn args: %q\n", args)
 	}
-	if e.Model != "" {
-		args = append(args, "--model", e.Model)
-	}
-	if e.Effort != "" {
-		args = append(args, "--effort", e.Effort)
-	}
-	if e.SettingsJSON != "" {
-		args = append(args, "--settings", e.SettingsJSON)
-	}
-	if e.MemoryFile != "" {
-		if _, err := os.Stat(e.MemoryFile); err == nil {
-			args = append(args, "--append-system-prompt-file", e.MemoryFile)
-		}
-	}
-	if resumeID != "" {
-		args = append(args, "--resume", resumeID)
-	}
-	args = append(args, e.modeArgs()...)
-
 	cmd := exec.CommandContext(ctx, e.BinPath, args...)
 	if e.Cwd != "" {
 		cmd.Dir = e.Cwd
@@ -315,6 +307,12 @@ func (e *Engine) Send(ctx context.Context, prompt, resumeID string) <-chan Event
 					out <- Event{
 						Kind: EvResult, SessionID: re.SessionID, CostUSD: re.TotalCost,
 						Text: re.Result, Model: model, CtxUsed: ctxUsed, CtxWindow: ctxWindow,
+						Usage: TokenUsage{
+							Input:       re.Usage.InputTokens,
+							CacheRead:   re.Usage.CacheReadTokens,
+							CacheCreate: re.Usage.CacheCreationTokens,
+							Output:      re.Usage.OutputTokens,
+						},
 					}
 				}
 			}
@@ -339,33 +337,165 @@ func debugEnabled() bool {
 	return v != "" && v != "0" && !strings.EqualFold(v, "false")
 }
 
-// RunOneShot runs a single non-interactive prompt and returns its text result.
-// It is for side tasks (e.g. memory summarization), separate from the main
-// streaming turn: no tools, no resume, no memory injection.
-func RunOneShot(ctx context.Context, bin, cwd, model, effort, prompt string) (string, error) {
-	args := []string{"-p", prompt, "--output-format", "json", "--permission-mode", "dontAsk"}
-	if model != "" {
-		args = append(args, "--model", model)
+// SideCall is a self-contained text task run outside the conversation — memory
+// upkeep, thread summarisation — where the model is asked to transform text it
+// is handed and nothing else.
+//
+// It exists as its own type because running such a task through a plain
+// `claude -p` is startlingly expensive. The CLI is built for coding sessions, so
+// by default it assembles its full system prompt, discovers CLAUDE.md up the
+// tree, declares every built-in tool, loads every ambient MCP server and lists
+// the skill catalogue — measured at ~30k input tokens before the actual prompt is
+// even considered. For a turn that reads two paragraphs and rewrites a bullet
+// list, all of it is waste, and it was being paid once per turn.
+//
+// So a side call strips the environment down to the task: the default system
+// prompt is replaced rather than appended to, no tools are declared, no MCP
+// server is loaded, no settings file is read, no skills are listed and no
+// resumable session is left behind. It runs in a neutral directory so nothing
+// project-scoped is discovered either. The same request then costs a few hundred
+// tokens.
+//
+// Every one of those flags is optional and version-dependent, so each is applied
+// only where the installed CLI advertises it; on an older binary the call still
+// runs, just without the savings.
+type SideCall struct {
+	Bin          string // path to the claude binary
+	Model        string // model alias ("" = CLI default)
+	Effort       string // reasoning effort ("" = model default)
+	SystemPrompt string // replaces the default system prompt entirely
+	Prompt       string // the task itself
+}
+
+// Run executes the side call, returning the result text and what it consumed.
+// The usage is reported even on success-with-empty-result so callers can account
+// for background spend rather than letting it go unmeasured.
+func (c SideCall) Run(ctx context.Context) (string, TokenUsage, error) {
+	args := []string{"-p", c.Prompt, "--output-format", "json", "--permission-mode", "dontAsk"}
+	if c.Model != "" {
+		args = append(args, "--model", c.Model)
 	}
-	if effort != "" {
-		args = append(args, "--effort", effort)
+	if c.Effort != "" {
+		args = append(args, "--effort", c.Effort)
 	}
-	cmd := exec.CommandContext(ctx, bin, args...)
-	if cwd != "" {
-		cmd.Dir = cwd
+
+	caps := DetectCLICaps(c.Bin)
+	if c.SystemPrompt != "" && caps.SystemPrompt {
+		args = append(args, "--system-prompt", c.SystemPrompt)
 	}
+	if caps.Tools {
+		// An empty tool set is the point: this task is pure text transformation,
+		// and the text it is handed comes from a conversation, so a model with
+		// tools here would be both an expense and an unnecessary way for that
+		// text to reach the filesystem.
+		args = append(args, "--tools", "")
+	}
+	if caps.StrictMCPConfig {
+		args = append(args, "--strict-mcp-config")
+	}
+	if caps.SettingSources {
+		args = append(args, "--setting-sources", "")
+	}
+	if caps.DisableSlashCommands {
+		args = append(args, "--disable-slash-commands")
+	}
+	if caps.NoSessionPersistence {
+		args = append(args, "--no-session-persistence")
+	}
+
+	cmd := exec.CommandContext(ctx, c.Bin, args...)
+	// Deliberately not the project directory: a side call needs no project
+	// context, and a neutral cwd keeps CLAUDE.md discovery and directory-scoped
+	// MCP servers out of the request on CLI versions that lack the flags above.
+	cmd.Dir = os.TempDir()
+
 	out, err := cmd.Output()
 	if err != nil {
-		return "", err
+		return "", TokenUsage{}, err
 	}
 	var r struct {
 		Result  string `json:"result"`
 		IsError bool   `json:"is_error"`
+		Usage   struct {
+			InputTokens         int `json:"input_tokens"`
+			CacheCreationTokens int `json:"cache_creation_input_tokens"`
+			CacheReadTokens     int `json:"cache_read_input_tokens"`
+			OutputTokens        int `json:"output_tokens"`
+		} `json:"usage"`
 	}
-	if json.Unmarshal(out, &r) != nil || r.IsError {
-		return "", fmt.Errorf("summary failed")
+	if json.Unmarshal(out, &r) != nil {
+		return "", TokenUsage{}, fmt.Errorf("не удалось разобрать ответ claude")
 	}
-	return r.Result, nil
+	usage := TokenUsage{
+		Input:       r.Usage.InputTokens,
+		CacheRead:   r.Usage.CacheReadTokens,
+		CacheCreate: r.Usage.CacheCreationTokens,
+		Output:      r.Usage.OutputTokens,
+	}
+	if r.IsError {
+		return "", usage, fmt.Errorf("claude вернул ошибку")
+	}
+	return r.Result, usage, nil
+}
+
+// turnArgs assembles the full command line for one turn. It takes caps as a
+// parameter rather than probing, so the flag policy can be exercised against
+// both a current and an older CLI without spawning anything.
+func (e *Engine) turnArgs(prompt, resumeID string, caps CLICaps) []string {
+	args := []string{
+		"-p", prompt,
+		"--output-format", "stream-json",
+		"--verbose",
+		"--include-partial-messages",
+	}
+	// Every turn is a fresh process that rebuilds the system prompt, and the
+	// default prompt embeds per-machine sections — cwd, env, memory paths and git
+	// status. Git status changes the moment the agent edits a file, so those
+	// sections differ from what the previous turn cached, and the bytes after them
+	// have to be written into the cache again rather than read back.
+	//
+	// Moving them into the first user message keeps more of the prefix stable.
+	// Measured over three turns against fable, this shifts roughly 2k tokens per
+	// turn from cache-write pricing to cache-read pricing — worthwhile and free,
+	// though not the dominant cost. The model still receives the same
+	// information, just further down.
+	if caps.ExcludeDynamicPrompt {
+		args = append(args, "--exclude-dynamic-system-prompt-sections")
+	}
+	if e.Model != "" {
+		args = append(args, "--model", e.Model)
+	}
+	if e.FallbackModel != "" && caps.FallbackModel {
+		args = append(args, "--fallback-model", e.FallbackModel)
+	}
+	if e.Effort != "" {
+		args = append(args, "--effort", e.Effort)
+	}
+	if e.SettingsJSON != "" {
+		args = append(args, "--settings", e.SettingsJSON)
+	}
+	// memory.md starts empty and usually stays that way, and the runtime file
+	// mirroring it therefore exists but holds nothing. Passing it anyway asked the
+	// CLI to append an empty system prompt on every turn — harmless but pointless,
+	// so the file is checked for content rather than mere existence.
+	if e.MemoryFile != "" && fileHasContent(e.MemoryFile) {
+		args = append(args, "--append-system-prompt-file", e.MemoryFile)
+	}
+	if resumeID != "" {
+		args = append(args, "--resume", resumeID)
+	}
+	return append(args, e.modeArgs()...)
+}
+
+// fileHasContent reports whether path holds anything but whitespace. A missing
+// or unreadable file counts as empty, so a broken path silently costs nothing
+// rather than degrading every turn.
+func fileHasContent(path string) bool {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return false
+	}
+	return len(bytes.TrimSpace(b)) > 0
 }
 
 // modeArgs returns the tool-policy flags for the engine's current mode. In agent
