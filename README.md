@@ -36,8 +36,37 @@ package.
   asking"), off by default and persisted once enabled.
 - History search, thread export to Markdown, themes, and an optional spend
   warning.
-- In the web client header: context-window usage, subscription rate-limit
-  (5-hour / weekly) status, session cost, and pickers for model and effort.
+- Thread handoff: fold a long conversation into a transferable summary and
+  continue it in a fresh thread, so the transcript stops being replayed on
+  every turn (see "Token cost").
+- In the web client header: context-window usage, prompt-cache hit rate and
+  session token count, subscription rate-limit (5-hour / weekly) status, session
+  cost, connection health, and pickers for model and effort. The sidebar shows
+  what each thread has cost so far.
+
+## Token cost
+
+Each turn spawns `claude -p --resume`, which replays the whole session. A turn
+therefore does not cost a fixed amount — it costs more as the thread grows.
+A few things follow from that, and the client is built around them:
+
+- **Watch the cache.** The header shows what share of input tokens came from the
+  prompt cache. A settled thread sits high; a sustained low number means the
+  prompt is churning and the history is being re-sent at full price. The
+  per-thread totals in the sidebar show where the spend actually went.
+- **Hand off long threads.** Once the context bar passes half full, the
+  `⤳ новый контекст` button folds the thread into a summary and continues in a
+  new one. The old thread stays readable.
+- **Background upkeep is kept cheap.** Cross-thread memory runs as a stripped
+  side call — no tools, no MCP servers, no CLAUDE.md discovery, its own system
+  prompt — because running it as a normal `claude -p` cost about 30k input
+  tokens per turn for a text-rewriting task. It also skips small talk and
+  batches bursts into a single update.
+- **Model and effort dominate everything else.** `--model` and `--effort` are in
+  the header for that reason; `max` effort on a large model is the most
+  expensive thing in the app by a wide margin.
+
+Set `CCLU_DEBUG=1` to log each turn's command line and token usage to stderr.
 
 ## Requirements
 
@@ -84,11 +113,18 @@ and point the Go server at it:
     CCLU_DEV_SERVER=http://localhost:5173 ./claude-code-linux-ui serve
 
 The web header carries the project and model pickers, an effort selector, the
-chat/agent toggle and a skip-permissions toggle, plus a context-usage bar,
-5-hour / weekly rate-limit chips, and the session cost. Settings (the gear) hold
-the theme, spend limit, thread export, the manual project memory, and the
-cross-thread auto-memory (view / clear / on-off). From the sidebar you can open
-any directory as a project; connecting one opens it in agent mode.
+chat/agent toggle and a skip-permissions toggle, plus a context-usage bar, the
+session token count with its cache hit rate, a thread-handoff button, 5-hour /
+weekly rate-limit chips, the connection-health chip and the session cost.
+Settings (the gear) hold the theme, spend limit, thread export, the manual
+project memory, and the cross-thread auto-memory (view / clear / on-off). From
+the sidebar you can open any directory as a project; connecting one opens it in
+agent mode.
+
+The connection chip probes the path every turn depends on: it checks for a live
+tunnel interface first and only then handshakes with the Anthropic API through
+it, so a failing turn can be told apart from a failing link. The probe sends no
+request and no credentials.
 
 Note: subscription rate-limit chips show the binding window's status and reset
 time only — the headless CLI does not expose a percentage. The context bar

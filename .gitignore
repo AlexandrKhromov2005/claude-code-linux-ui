@@ -14,7 +14,7 @@
 /PROMPT.md
 /CLAUDE.md
 /.claude/
-/.omc/
+.omc/
 
 # editor / OS
 .DS_Store
