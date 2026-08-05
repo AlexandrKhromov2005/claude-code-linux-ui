@@ -423,6 +423,37 @@ func (s *Server) handleExport(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"path": path})
 }
 
+// uploadsDir is where attachment uploads land.
+func uploadsDir() string {
+	return filepath.Join(os.TempDir(), "claude-code-linux-ui-uploads")
+}
+
+// uploadRetention is how long an uploaded attachment is kept. Uploads are
+// referenced by absolute path in a thread's transcript, so they must outlive the
+// turn that used them — but they are copies, and the cap on a single upload is a
+// gigabyte, so keeping them forever quietly fills the disk.
+const uploadRetention = 7 * 24 * time.Hour
+
+// SweepUploads deletes uploaded attachments older than the retention window.
+// Best-effort: anything it cannot stat or remove is left alone.
+func SweepUploads() {
+	entries, err := os.ReadDir(uploadsDir())
+	if err != nil {
+		return
+	}
+	cutoff := time.Now().Add(-uploadRetention)
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil || info.ModTime().After(cutoff) {
+			continue
+		}
+		_ = os.Remove(filepath.Join(uploadsDir(), e.Name()))
+	}
+}
+
 // handleUpload accepts a single file and returns an absolute path usable as a
 // turn attachment. The part is streamed straight to disk (constant memory) so
 // large archives upload without buffering. Files land in a per-run uploads dir.
@@ -453,7 +484,7 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 		if name == "" || name == "." || name == "/" {
 			name = "upload"
 		}
-		dir := filepath.Join(os.TempDir(), "claude-code-linux-ui-uploads")
+		dir := uploadsDir()
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			part.Close()
 			badRequest(w, err.Error())

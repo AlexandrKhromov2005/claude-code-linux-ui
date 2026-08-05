@@ -124,6 +124,7 @@ func (s *Server) Serve() error {
 	if s.health != nil {
 		go s.health.Run(ctx)
 	}
+	go SweepUploads()
 	srv := &http.Server{Handler: s.Handler(), ReadHeaderTimeout: 10 * time.Second}
 	return srv.Serve(s.ln)
 }
