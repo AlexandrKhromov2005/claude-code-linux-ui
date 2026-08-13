@@ -557,7 +557,6 @@ func (a *App) SendTurn(ctx context.Context, text string, attachments []string) (
 	go func() {
 		defer close(out)
 		var buf strings.Builder
-		hadResult := false
 		for ev := range src {
 			switch ev.Kind {
 			case EvText:
@@ -567,12 +566,16 @@ func (a *App) SendTurn(ctx context.Context, text string, attachments []string) (
 			case EvRateLimit:
 				a.setLimit(ev.LimitType, ev.LimitResets, ev.LimitStatus)
 			case EvResult:
-				hadResult = true
 				a.setSessionID(slug, th, ev.SessionID)
 				final := buf.String()
 				if strings.TrimSpace(final) == "" {
 					final = ev.Text
 				}
+				// A turn that launches a subagent finishes more than once: the
+				// model replies, the subagent reports back later, and the model
+				// replies again. Each reply is its own message, so the buffer
+				// starts empty again rather than repeating the first one.
+				buf.Reset()
 				a.persistAssistant(slug, th, final)
 				a.setContext(ev.CtxUsed, ev.CtxWindow, ev.Model)
 				a.addTurnUsage(ev.Usage)
@@ -587,7 +590,9 @@ func (a *App) SendTurn(ctx context.Context, text string, attachments []string) (
 			}
 			out <- ev
 		}
-		if !hadResult && strings.TrimSpace(buf.String()) != "" {
+		// Whatever is left was streamed after the last reply was persisted — the
+		// tail of a cancelled or broken turn. Keep it rather than lose it.
+		if strings.TrimSpace(buf.String()) != "" {
 			a.persistAssistant(slug, th, buf.String())
 		}
 	}()

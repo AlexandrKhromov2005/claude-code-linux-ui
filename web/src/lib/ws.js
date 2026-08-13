@@ -1,12 +1,17 @@
 import { api } from './api.js';
 import {
-  appState, messages, liveByThread, pendingApproval, wsConnected, connection,
-  lastTurnUsage, setLive, appendLiveText, clearLive, liveFor,
+  appState, messages, liveByThread, agentsByThread, pendingApproval, wsConnected,
+  connection, lastTurnUsage, setLive, appendLiveText, clearLive, liveFor,
+  setAgents, clearAgents,
 } from '../stores/state.js';
 import { get } from 'svelte/store';
 
 let ws = null;
 let sendFn = null; // exposed so components can call ws.send
+
+// The tools that launch a subagent. The CLI renamed this one (Task → Agent), so
+// both are recognised rather than whichever version happens to be installed.
+const SUBAGENT_TOOLS = new Set(['Agent', 'Task']);
 
 // viewing reports whether threadId is the thread the user is currently looking
 // at. Turn output is stamped with its thread id by the server; we only touch the
@@ -27,7 +32,10 @@ export function connectWS() {
     // A fresh socket cannot resume a turn that was streaming to a previous
     // connection, so any leftover "streaming" slice is stale. Clear it so the
     // composer never stays locked behind a ghost spinner after a reconnect.
+    // Dropping the socket cancels those turns server-side, so their subagents
+    // are gone too and must not be left on screen looking alive.
     liveByThread.set({});
+    agentsByThread.set({});
   });
 
   ws.addEventListener('close', () => {
@@ -110,12 +118,20 @@ function handleEvent(msg) {
 
     case 'tool_start':
       setLive(tid, { streaming: true, tool: msg.tool || 'tool' });
-      if (viewing(tid)) {
+      // Launching a subagent is not a line in the transcript: the panel below
+      // says who was launched and what became of them, in more detail than a
+      // bare tool name ever could.
+      if (viewing(tid) && !SUBAGENT_TOOLS.has(msg.tool)) {
         messages.update(ms => [
           ...ms,
           { role: 'tool', content: msg.tool || '', ts: new Date().toISOString(), _transient: true },
         ]);
       }
+      break;
+
+    case 'agents':
+      // A full snapshot of the turn's subagents, so it replaces rather than merges.
+      setAgents(tid, msg.agents, msg.now);
       break;
 
     case 'system_init':
@@ -128,8 +144,19 @@ function handleEvent(msg) {
       }
       break;
 
-    case 'result':
-      setLive(tid, { tool: '' });
+    case 'result': {
+      // A result ends a reply, not necessarily the turn: a subagent reports back
+      // after the model has already answered, and the model answers again on the
+      // same stream. Each reply is closed off here — as the server does when it
+      // persists them — so two replies do not run together into one paragraph.
+      const done = liveFor(tid).text || msg.text || '';
+      if (done && viewing(tid)) {
+        messages.update(ms => [
+          ...ms,
+          { role: 'assistant', content: done, ts: new Date().toISOString() },
+        ]);
+      }
+      setLive(tid, { text: '', tool: '' });
       // Cost/context/model/usage are session-global; update regardless of thread.
       appState.update(s => s ? {
         ...s,
@@ -141,6 +168,7 @@ function handleEvent(msg) {
       } : s);
       if (msg.turnUsage) lastTurnUsage.set(msg.turnUsage);
       break;
+    }
 
     case 'retry':
       if (viewing(tid)) {
@@ -201,8 +229,10 @@ export function sendMessage(text, attachmentPaths) {
     return;
   }
   // Bind this turn's live state to the thread it is sent from, so its output
-  // renders only there even if the user switches threads mid-turn.
+  // renders only there even if the user switches threads mid-turn. The previous
+  // turn's subagents go with it — they belong to the exchange above.
   setLive(threadId, { streaming: true, text: '', tool: '' });
+  clearAgents(threadId);
   // Add user message to the visible list immediately (current thread == threadId).
   messages.update(ms => [
     ...ms,

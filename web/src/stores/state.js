@@ -13,6 +13,36 @@ export const connection = writable({ state: 'checking', detail: 'проверк�
 // from appState because it describes one turn, not the session.
 export const lastTurnUsage = writable(null);
 
+// agentsByThread holds the subagents of each thread's most recent turn:
+//   { [threadId]: AgentState[] }
+// It is deliberately not part of the live slice below: a subagent panel that
+// vanished the moment the turn ended would take the answer to "did they finish?"
+// with it. The list is replaced when the thread sends again.
+export const agentsByThread = writable({});
+
+// serverSkew is (server clock - browser clock) in ms, learned from the timestamp
+// the server stamps on every subagent update. Subagent ages are measured on the
+// server's clock, and the browser may be on the far side of an SSH tunnel.
+export const serverSkew = writable(0);
+
+// setAgents replaces a thread's subagent list and re-learns the clock offset.
+export function setAgents(threadId, list, serverNow) {
+  if (!threadId || !Array.isArray(list)) return;
+  if (serverNow) serverSkew.set(serverNow - Date.now());
+  agentsByThread.update(m => ({ ...m, [threadId]: list }));
+}
+
+// clearAgents drops a thread's subagents, so a new turn starts with a clean panel.
+export function clearAgents(threadId) {
+  if (!threadId) return;
+  agentsByThread.update(m => {
+    if (!(threadId in m)) return m;
+    const next = { ...m };
+    delete next[threadId];
+    return next;
+  });
+}
+
 // liveByThread holds the in-flight turn state for each thread id:
 //   { [threadId]: { streaming: bool, text: string, tool: string } }
 // Turns in different threads run concurrently, so each one keeps its own live
@@ -92,4 +122,21 @@ export const streamingThreads = derived(liveByThread, $m => {
   const ids = new Set();
   for (const id in $m) if ($m[id]?.streaming) ids.add(id);
   return ids;
+});
+
+// Subagents of the open thread's last turn, and how many are still working.
+export const agents = derived(
+  [appState, agentsByThread],
+  ([$s, $m]) => $m[$s?.thread?.id] || [],
+);
+export const runningAgents = derived(agents, $a => $a.filter(a => a.status === 'running').length);
+
+// Per-thread count of working subagents, for the sidebar.
+export const agentCounts = derived(agentsByThread, $m => {
+  const counts = {};
+  for (const id in $m) {
+    const n = $m[id].filter(a => a.status === 'running').length;
+    if (n > 0) counts[id] = n;
+  }
+  return counts;
 });

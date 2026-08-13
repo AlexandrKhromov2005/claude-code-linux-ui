@@ -6,10 +6,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"slices"
 	"strings"
+	"time"
 )
 
 // Mode selects the tool policy a turn runs under.
@@ -66,6 +68,7 @@ const (
 	EvRetry                       // API retry in progress
 	EvNotice                      // an out-of-band notice from the core (e.g. budget)
 	EvRateLimit                   // a subscription rate-limit status update
+	EvAgents                      // the turn's subagents changed (full snapshot)
 )
 
 // Event is the normalized unit a client consumes. It is deliberately a plain
@@ -96,6 +99,11 @@ type Event struct {
 	LimitType   string // "five_hour" | "seven_day"
 	LimitResets int64  // unix seconds when the window resets
 	LimitStatus string // e.g. "allowed"
+
+	// Agents is the full state of every subagent seen this turn, carried on
+	// EvAgents. It is a snapshot rather than a delta so a client only ever has
+	// to replace what it is showing.
+	Agents []AgentState
 }
 
 // Engine drives Claude Code in headless mode (`claude -p`). It is configured
@@ -143,6 +151,11 @@ type rawEvent struct {
 	IsError   bool    `json:"is_error"`
 
 	Attempt int `json:"attempt"`
+
+	// Set on everything a subagent emits, naming the Agent tool call that
+	// launched it. Its presence is what separates the subagent's stream from the
+	// main conversation's.
+	ParentToolUseID string `json:"parent_tool_use_id"`
 
 	Event json.RawMessage `json:"event"`
 
@@ -219,106 +232,12 @@ func (e *Engine) Send(ctx context.Context, prompt, resumeID string) <-chan Event
 	go func() {
 		defer close(out)
 
-		sc := bufio.NewScanner(stdout)
-		// stream-json lines (and especially attached-file echoes) can be large.
-		sc.Buffer(make([]byte, 0, 1<<20), 32<<20)
+		scanStream(stdout, out)
 
-		// lastCtx tracks the most recent API call's context size (input + cache).
-		// The result event's top-level usage sums every tool iteration, so it
-		// overcounts; the last assistant message reflects the live context.
-		var lastCtx int
-
-		for sc.Scan() {
-			line := strings.TrimSpace(sc.Text())
-			if line == "" {
-				continue
-			}
-			var re rawEvent
-			if json.Unmarshal([]byte(line), &re) != nil {
-				continue
-			}
-
-			switch re.Type {
-			case "system":
-				switch re.Subtype {
-				case "init":
-					out <- Event{Kind: EvSystemInit, SessionID: re.SessionID, Model: re.Model}
-				case "api_retry":
-					out <- Event{Kind: EvRetry, Attempt: re.Attempt}
-				}
-
-			case "assistant":
-				if c := re.Message.Usage.InputTokens + re.Message.Usage.CacheReadTokens + re.Message.Usage.CacheCreationTokens; c > 0 {
-					lastCtx = c
-				}
-
-			case "rate_limit_event":
-				if re.RateLimitInfo.RateLimitType != "" {
-					out <- Event{
-						Kind:        EvRateLimit,
-						LimitType:   re.RateLimitInfo.RateLimitType,
-						LimitResets: re.RateLimitInfo.ResetsAt,
-						LimitStatus: re.RateLimitInfo.Status,
-					}
-				}
-
-			case "stream_event":
-				var si streamInner
-				if len(re.Event) > 0 {
-					_ = json.Unmarshal(re.Event, &si)
-				}
-				if si.Delta.Type == "text_delta" && si.Delta.Text != "" {
-					out <- Event{Kind: EvText, Text: si.Delta.Text}
-				}
-				if si.Type == "content_block_start" && si.ContentBlock.Type == "tool_use" {
-					name := si.ContentBlock.Name
-					if name == "" {
-						name = "tool"
-					}
-					out <- Event{Kind: EvToolStart, Tool: name}
-				}
-
-			case "result":
-				if re.IsError {
-					msg := strings.TrimSpace(re.Result)
-					if msg == "" {
-						msg = "claude вернул ошибку"
-					}
-					out <- Event{Kind: EvError, Err: fmt.Errorf("%s", msg)}
-				} else {
-					if debugEnabled() {
-						fmt.Fprintf(os.Stderr, "[cclu] turn usage: input=%d cache_read=%d cache_creation=%d output=%d\n",
-							re.Usage.InputTokens, re.Usage.CacheReadTokens, re.Usage.CacheCreationTokens, re.Usage.OutputTokens)
-					}
-					// Prefer the last assistant call's context; fall back to the
-					// (aggregate) result usage only if no assistant usage was seen.
-					ctxUsed := lastCtx
-					if ctxUsed == 0 {
-						ctxUsed = re.Usage.InputTokens + re.Usage.CacheReadTokens + re.Usage.CacheCreationTokens
-					}
-					ctxWindow := 0
-					model := re.Model
-					for id, mu := range re.ModelUsage {
-						if mu.ContextWindow > ctxWindow {
-							ctxWindow = mu.ContextWindow
-							model = id
-						}
-					}
-					out <- Event{
-						Kind: EvResult, SessionID: re.SessionID, CostUSD: re.TotalCost,
-						Text: re.Result, Model: model, CtxUsed: ctxUsed, CtxWindow: ctxWindow,
-						Usage: TokenUsage{
-							Input:       re.Usage.InputTokens,
-							CacheRead:   re.Usage.CacheReadTokens,
-							CacheCreate: re.Usage.CacheCreationTokens,
-							Output:      re.Usage.OutputTokens,
-						},
-					}
-				}
-			}
-		}
-
-		if err := cmd.Wait(); err != nil {
+		// A cancelled turn exits by being killed, which is not news: the user
+		// asked for it, and reporting "signal: killed" on top of the subagents
+		// already marked as cut short only muddies what happened.
+		if err := cmd.Wait(); err != nil && ctx.Err() == nil {
 			msg := strings.TrimSpace(stderr.String())
 			if msg == "" {
 				msg = err.Error()
@@ -328,6 +247,156 @@ func (e *Engine) Send(ctx context.Context, prompt, resumeID string) <-chan Event
 	}()
 
 	return out
+}
+
+// scanStream reads the CLI's NDJSON and translates it into events. It is split
+// out of Send so the whole wire contract can be exercised against recorded
+// output instead of a live process.
+func scanStream(r io.Reader, out chan<- Event) {
+	sc := bufio.NewScanner(r)
+	// stream-json lines (and especially attached-file echoes) can be large.
+	sc.Buffer(make([]byte, 0, 1<<20), 32<<20)
+
+	// lastCtx tracks the most recent API call's context size (input + cache).
+	// The result event's top-level usage sums every tool iteration, so it
+	// overcounts; the last assistant message reflects the live context.
+	var lastCtx int
+
+	// billed is the cost the turn has already reported. A turn that launches
+	// a subagent produces several result events — the main model finishes its
+	// reply, then wakes up when the subagent reports back — and each one
+	// restates total_cost_usd for the whole invocation, not for its own
+	// segment (measured against claude 2.1.228: seven results rising
+	// 0.05 → 0.46, ending on the session total the CLI reports in
+	// modelUsage). Events carry what they add, so the difference is emitted.
+	var billed float64
+
+	agents := newAgentTracker()
+	// Proof-of-life messages arrive in bursts, and each one only moves a
+	// timestamp. Coalescing them keeps a chatty subagent from turning into a
+	// flood of snapshots while still refreshing the UI about once a second.
+	var lastBeat time.Time
+	emitAgents := func() {
+		lastBeat = time.Now()
+		out <- Event{Kind: EvAgents, Agents: agents.snapshot()}
+	}
+
+	for sc.Scan() {
+		line := strings.TrimSpace(sc.Text())
+		if line == "" {
+			continue
+		}
+		var re rawEvent
+		if json.Unmarshal([]byte(line), &re) != nil {
+			continue
+		}
+
+		// Anything a subagent emits is proof it is alive, and nothing more:
+		// its text belongs to its own nested conversation, not to the reply
+		// being streamed here.
+		if re.ParentToolUseID != "" {
+			if agents.touch(re.ParentToolUseID) && time.Since(lastBeat) >= time.Second {
+				emitAgents()
+			}
+			continue
+		}
+
+		switch re.Type {
+		case "system":
+			switch re.Subtype {
+			case "init":
+				out <- Event{Kind: EvSystemInit, SessionID: re.SessionID, Model: re.Model}
+			case "api_retry":
+				out <- Event{Kind: EvRetry, Attempt: re.Attempt}
+			default:
+				if sig, ok := parseAgentSignal(re.Subtype, []byte(line)); ok && agents.apply(sig) {
+					emitAgents()
+				}
+			}
+
+		case "assistant":
+			if c := re.Message.Usage.InputTokens + re.Message.Usage.CacheReadTokens + re.Message.Usage.CacheCreationTokens; c > 0 {
+				lastCtx = c
+			}
+
+		case "rate_limit_event":
+			if re.RateLimitInfo.RateLimitType != "" {
+				out <- Event{
+					Kind:        EvRateLimit,
+					LimitType:   re.RateLimitInfo.RateLimitType,
+					LimitResets: re.RateLimitInfo.ResetsAt,
+					LimitStatus: re.RateLimitInfo.Status,
+				}
+			}
+
+		case "stream_event":
+			var si streamInner
+			if len(re.Event) > 0 {
+				_ = json.Unmarshal(re.Event, &si)
+			}
+			if si.Delta.Type == "text_delta" && si.Delta.Text != "" {
+				out <- Event{Kind: EvText, Text: si.Delta.Text}
+			}
+			if si.Type == "content_block_start" && si.ContentBlock.Type == "tool_use" {
+				name := si.ContentBlock.Name
+				if name == "" {
+					name = "tool"
+				}
+				out <- Event{Kind: EvToolStart, Tool: name}
+			}
+
+		case "result":
+			if re.IsError {
+				msg := strings.TrimSpace(re.Result)
+				if msg == "" {
+					msg = "claude вернул ошибку"
+				}
+				out <- Event{Kind: EvError, Err: fmt.Errorf("%s", msg)}
+			} else {
+				if debugEnabled() {
+					fmt.Fprintf(os.Stderr, "[cclu] turn usage: input=%d cache_read=%d cache_creation=%d output=%d\n",
+						re.Usage.InputTokens, re.Usage.CacheReadTokens, re.Usage.CacheCreationTokens, re.Usage.OutputTokens)
+				}
+				// Prefer the last assistant call's context; fall back to the
+				// (aggregate) result usage only if no assistant usage was seen.
+				ctxUsed := lastCtx
+				if ctxUsed == 0 {
+					ctxUsed = re.Usage.InputTokens + re.Usage.CacheReadTokens + re.Usage.CacheCreationTokens
+				}
+				ctxWindow := 0
+				model := re.Model
+				for id, mu := range re.ModelUsage {
+					if mu.ContextWindow > ctxWindow {
+						ctxWindow = mu.ContextWindow
+						model = id
+					}
+				}
+				cost := re.TotalCost - billed
+				if cost < 0 {
+					cost = 0
+				}
+				billed = re.TotalCost
+				out <- Event{
+					Kind: EvResult, SessionID: re.SessionID, CostUSD: cost,
+					Text: re.Result, Model: model, CtxUsed: ctxUsed, CtxWindow: ctxWindow,
+					Usage: TokenUsage{
+						Input:       re.Usage.InputTokens,
+						CacheRead:   re.Usage.CacheReadTokens,
+						CacheCreate: re.Usage.CacheCreationTokens,
+						Output:      re.Usage.OutputTokens,
+					},
+				}
+			}
+		}
+	}
+
+	// The stream is the only channel a subagent has. Once it is gone, anything
+	// still marked running was cut short — by the process exiting, by a
+	// cancelled turn, or by the subagent dying without a word — and saying so
+	// is more useful than leaving a spinner running forever.
+	if agents.abortRunning() {
+		emitAgents()
+	}
 }
 
 // debugEnabled reports whether verbose per-turn diagnostics are on. It is gated

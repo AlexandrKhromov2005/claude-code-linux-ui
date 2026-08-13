@@ -78,6 +78,7 @@ var (
 	approveTitleStyle lipgloss.Style
 	ruleInputStyle    lipgloss.Style
 	warnStyle         lipgloss.Style
+	agentOKStyle      lipgloss.Style
 )
 
 // applyTheme switches the active palette and rebuilds every style. Unknown names
@@ -131,6 +132,7 @@ func buildStyles() {
 	approveTitleStyle = lipgloss.NewStyle().Bold(true).Foreground(colWarn)
 	ruleInputStyle = lipgloss.NewStyle().Foreground(colAccent)
 	warnStyle = lipgloss.NewStyle().Foreground(colWarn)
+	agentOKStyle = lipgloss.NewStyle().Foreground(colAdd)
 }
 
 func init() { applyTheme("dark") }

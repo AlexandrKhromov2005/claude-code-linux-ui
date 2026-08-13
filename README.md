@@ -23,6 +23,13 @@ package.
   shared per-project memory (a cheap background summary) and injected into every
   thread, so a fact stated in one thread is known in the others. Editable and
   toggleable; the manual `memory.md` is merged in too.
+- Subagent visibility. When the model fans work out to subagents, each one is
+  listed while it runs: what it is doing, which tool it last used, how long it
+  has been working and how long since it last said anything. A subagent goes
+  quiet for as long as one step takes, so silence is reported as silence rather
+  than as failure — but a long gap is visible, and anything still running when
+  the turn ends is marked as cut short instead of spinning forever. The list
+  stays on screen after the turn so the outcome is readable (see "Subagents").
 - Persistent history: transcripts and the Claude session id survive restarts;
   threads can be resumed.
 - File and image attachments via a picker or `@path` references; web uploads are
@@ -65,6 +72,10 @@ A few things follow from that, and the client is built around them:
 - **Model and effort dominate everything else.** `--model` and `--effort` are in
   the header for that reason; `max` effort on a large model is the most
   expensive thing in the app by a wide margin.
+- **Subagents bill through the same turn.** A turn that fans out reports its
+  cost several times, each figure covering the whole invocation so far rather
+  than the latest slice. Only the difference is added, so the session total is
+  what the CLI actually charged and not a multiple of it.
 
 Set `CCLU_DEBUG=1` to log each turn's command line and token usage to stderr.
 
@@ -129,6 +140,28 @@ request and no credentials.
 Note: subscription rate-limit chips show the binding window's status and reset
 time only — the headless CLI does not expose a percentage. The context bar
 reflects the context window, not the subscription limit.
+
+## Subagents
+
+A subagent is a nested session the model launches through the Agent tool, and it
+runs asynchronously: the tool call returns the moment the subagent starts, so the
+model can answer, go quiet, and then answer again when the subagent reports back.
+A turn like that therefore finishes more than once, and without a separate
+account of it the client looks idle while real work is happening.
+
+Both clients keep that account. The web client shows a panel per turn — one row
+per subagent, with its type, its job, what it is doing right now, its tool calls
+and tokens — and a dot that beats while the subagent is talking, slows when it
+has been quiet for 45 seconds and stops at two and a half minutes ("нет
+сигнала"). The terminal client shows the same thing condensed into one line
+above the input. Threads with subagents still working carry a `⚙ N` badge in the
+sidebar, so a fan-out started in one thread stays visible from another.
+
+A quiet subagent is not a dead one: it only speaks between steps, and a single
+long tool call looks exactly like silence from outside. The thresholds are set
+past what healthy work looks like, and the wording stops at what is actually
+known. The one case that is certain is the turn ending with a subagent still
+running — cancelled, or the CLI exiting — and that is marked as such.
 
 ## Modes
 

@@ -1,6 +1,6 @@
 <script>
   import { onMount } from 'svelte';
-  import { appState, messages, streamingThreads } from '../stores/state.js';
+  import { appState, messages, streamingThreads, agentCounts } from '../stores/state.js';
   import { api } from './api.js';
 
   let projects = [];
@@ -254,6 +254,9 @@
             {t.title || 'Без названия'}
           </div>
           <div class="thread-meta">
+            {#if $agentCounts[t.id]}
+              <span class="agent-badge" title="работающих сабагентов: {$agentCounts[t.id]}">⚙ {$agentCounts[t.id]}</span>
+            {/if}
             <span class="thread-date">{formatDate(t.updated)}</span>
             <span class="thread-count">{t.count} сообщ.</span>
             {#if t.cost > 0}
@@ -514,6 +517,19 @@
   @keyframes run-pulse {
     0%, 100% { opacity: 0.45; transform: scale(0.8); }
     50%      { opacity: 1; transform: scale(1.1); box-shadow: 0 0 6px var(--green); }
+  }
+
+  /* How many subagents that thread has working, so a fan-out started in one
+     thread stays visible while the user reads another. */
+  .agent-badge {
+    font-family: var(--mono);
+    font-size: 10px;
+    color: var(--green);
+    background: var(--green-soft);
+    border-radius: 3px;
+    padding: 0 4px;
+    margin-left: 4px;
+    vertical-align: middle;
   }
 
   .thread-meta {

@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/bubbles/filepicker"
 	"github.com/charmbracelet/bubbles/spinner"
@@ -79,9 +80,14 @@ type model struct {
 	streamBuf     string
 	streaming     bool
 	turnHadResult bool
-	overlay       overlayKind
-	status        string
-	pendingHint   string
+
+	// agents is the current turn's subagents, newest snapshot wins. It outlives
+	// the turn so the outcome of a fan-out stays readable, and is cleared when
+	// the thread sends again.
+	agents      []core.AgentState
+	overlay     overlayKind
+	status      string
+	pendingHint string
 
 	pending      *core.ApprovalRequest
 	pendingReply chan core.ApprovalDecision
@@ -185,7 +191,9 @@ func (m *model) syncAfterOpen() {
 	m.streaming = false
 	m.sessionShort = ""
 	m.costUSD = 0
+	m.agents = nil
 	if m.ready {
+		m.layout()
 		m.rerenderAll()
 		m.refreshViewport()
 	}
@@ -197,7 +205,9 @@ func (m *model) startNewThread() {
 	m.streamBuf = ""
 	m.streaming = false
 	m.sessionShort = ""
+	m.agents = nil
 	if m.ready {
+		m.layout()
 		m.rerenderAll()
 		m.refreshViewport()
 	}
@@ -210,7 +220,11 @@ func (m *model) showThread(t *core.Thread) {
 	if t.ClaudeSessionID != "" {
 		m.sessionShort = shortID(t.ClaudeSessionID)
 	}
+	// The subagent line belongs to the turn it came from, not to whatever
+	// thread is being opened now.
+	m.agents = nil
 	if m.ready {
+		m.layout()
 		m.rerenderAll()
 		m.refreshViewport()
 	}
@@ -371,7 +385,7 @@ const (
 
 func (m *model) layout() {
 	inputBoxH := taLines + 2
-	vpH := m.height - headerH - attachH - footerH - inputBoxH
+	vpH := m.height - headerH - attachH - footerH - inputBoxH - m.agentsH()
 	if vpH < 3 {
 		vpH = 3
 	}
@@ -807,6 +821,9 @@ func (m model) updateMain(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.streaming = true
 			m.turnHadResult = false
 			m.streamBuf = ""
+			// The previous turn's subagents belong to the exchange above.
+			m.agents = nil
+			m.layout()
 			m.status = "думаю…"
 			m.refreshViewport()
 
@@ -830,6 +847,15 @@ func (m model) updateMain(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.refreshViewport()
 		case core.EvToolStart:
 			m.status = "⚙ " + ev.Tool
+		case core.EvAgents:
+			// The line appears and disappears with the subagents, so the viewport
+			// has to give up (and take back) the row it occupies.
+			before := m.agentsH()
+			m.agents = ev.Agents
+			if m.agentsH() != before {
+				m.layout()
+				m.refreshViewport()
+			}
 		case core.EvRetry:
 			m.status = fmt.Sprintf("повтор запроса (#%d)…", ev.Attempt)
 		case core.EvResult:
@@ -843,8 +869,14 @@ func (m model) updateMain(msg tea.Msg) (tea.Model, tea.Cmd) {
 				final = ev.Text
 			}
 			m.commitAssistant(final)
-			m.streaming = false
-			m.status = ""
+			// A result is not necessarily the end of the turn: a subagent reports
+			// back after the model has already replied, and the model then replies
+			// again on the same stream. The turn is over when the stream is, so
+			// the spinner keeps running and Esc keeps cancelling until then.
+			m.status = "завершение…"
+			if core.RunningAgents(m.agents) > 0 {
+				m.status = "сабагенты работают…"
+			}
 			m.refreshViewport()
 		case core.EvNotice:
 			m.commitSystem("⚠ " + ev.Text)
@@ -864,7 +896,10 @@ func (m model) updateMain(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case streamClosedMsg:
 		if m.streaming {
 			m.streaming = false
-			if !m.turnHadResult && strings.TrimSpace(m.streamBuf) != "" {
+			// Each reply is committed as its own result arrives and clears the
+			// buffer, so anything left here was streamed after the last one — the
+			// tail of a cancelled or broken turn.
+			if strings.TrimSpace(m.streamBuf) != "" {
 				m.commitAssistant(m.streamBuf)
 			}
 			m.streamBuf = ""
@@ -1250,13 +1285,11 @@ func (m model) View() string {
 	case overlayApprove:
 		return m.approveView()
 	}
-	return lipgloss.JoinVertical(lipgloss.Left,
-		m.headerView(),
-		m.vp.View(),
-		m.attachmentsView(),
-		m.inputView(),
-		m.footerView(),
-	)
+	rows := []string{m.headerView(), m.vp.View(), m.attachmentsView()}
+	if line := m.agentsView(); line != "" {
+		rows = append(rows, line)
+	}
+	return lipgloss.JoinVertical(lipgloss.Left, append(rows, m.inputView(), m.footerView())...)
 }
 
 func (m model) approveView() string {
@@ -1310,6 +1343,119 @@ func (m model) headerView() string {
 		gap = 1
 	}
 	return " " + left + strings.Repeat(" ", gap) + right
+}
+
+// agentsH is the height the subagent line takes: one row while there is
+// anything to say about subagents, nothing at all otherwise.
+func (m model) agentsH() int {
+	if len(m.agents) == 0 {
+		return 0
+	}
+	return 1
+}
+
+// agentsView renders the turn's subagents as a single line. A subagent works
+// out of sight, so the line answers two questions and no others: is it still
+// working, and when did we last hear from it.
+func (m model) agentsView() string {
+	if len(m.agents) == 0 {
+		return ""
+	}
+	now := time.Now()
+	running := core.RunningAgents(m.agents)
+
+	head := fmt.Sprintf("⚙ сабагенты %d/%d", running, len(m.agents))
+	if running == 0 {
+		head = "⚙ сабагенты · " + agentOutcome(m.agents)
+	}
+	parts := []string{statusStyle.Render(head)}
+	for _, a := range m.agents {
+		parts = append(parts, agentChip(a, now))
+	}
+	line := " " + strings.Join(parts, metaStyle.Render(" · "))
+	return truncate(line, m.width)
+}
+
+// agentOutcome counts how a finished set of subagents ended. The impersonal
+// "готово: 2" form is used because it reads correctly for any count.
+func agentOutcome(list []core.AgentState) string {
+	count := func(s core.AgentStatus) int {
+		n := 0
+		for _, a := range list {
+			if a.Status == s {
+				n++
+			}
+		}
+		return n
+	}
+	var parts []string
+	for _, o := range []struct {
+		label string
+		n     int
+	}{
+		{"готово", count(core.AgentDone)},
+		{"с ошибкой", count(core.AgentFailed)},
+		{"прервано", count(core.AgentAborted)},
+	} {
+		if o.n > 0 {
+			parts = append(parts, fmt.Sprintf("%s: %d", o.label, o.n))
+		}
+	}
+	return strings.Join(parts, " · ")
+}
+
+// agentChip is one subagent's state, coloured by how alive it looks.
+func agentChip(a core.AgentState, now time.Time) string {
+	name := a.Type
+	if name == "" {
+		name = "agent"
+	}
+	style, verdict := agentVerdict(a, now)
+	if a.Live() && a.Tool != "" {
+		return style.Render(fmt.Sprintf("%s %s %s", name, a.Tool, verdict))
+	}
+	return style.Render(name + " " + verdict)
+}
+
+// agentVerdict phrases a subagent's state. Silence is reported as silence —
+// a single long tool call looks exactly like a dead subagent from here, and
+// only the turn ending settles which it was.
+func agentVerdict(a core.AgentState, now time.Time) (lipgloss.Style, string) {
+	switch a.Status {
+	case core.AgentDone:
+		return statusStyle, "✓ " + shortDur(a.Elapsed(now))
+	case core.AgentFailed:
+		return errStyle, "✗ ошибка"
+	case core.AgentAborted:
+		return statusStyle, "⊘ прерван"
+	}
+	switch quiet := a.Silence(now); {
+	case quiet >= core.AgentSilentAfter:
+		return errStyle, "нет сигнала " + shortDur(quiet)
+	case quiet >= core.AgentQuietAfter:
+		return warnStyle, "тишина " + shortDur(quiet)
+	default:
+		return agentOKStyle, shortDur(a.Elapsed(now))
+	}
+}
+
+// shortDur formats a duration the way a progress line needs it: seconds up to a
+// minute, then minutes and seconds.
+func shortDur(d time.Duration) string {
+	s := int(d.Round(time.Second).Seconds())
+	if s < 60 {
+		return fmt.Sprintf("%dс", s)
+	}
+	return fmt.Sprintf("%dм%02dс", s/60, s%60)
+}
+
+// truncate clips a rendered line to the terminal width, keeping the ellipsis
+// outside the styled runs so colours are not cut mid-sequence.
+func truncate(s string, width int) string {
+	if width <= 1 || lipgloss.Width(s) <= width {
+		return s
+	}
+	return lipgloss.NewStyle().MaxWidth(width-1).Render(s) + statusStyle.Render("…")
 }
 
 func (m model) attachmentsView() string {

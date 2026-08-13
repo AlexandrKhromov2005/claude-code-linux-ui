@@ -1,7 +1,8 @@
 <script>
   import { onMount, afterUpdate } from 'svelte';
-  import { messages, liveText, streaming, liveTool } from '../stores/state.js';
+  import { messages, liveText, streaming, liveTool, runningAgents } from '../stores/state.js';
   import { renderMarkdown } from './markdown.js';
+  import AgentPanel from './AgentPanel.svelte';
 
   let listEl;
 
@@ -80,11 +81,15 @@
     {/if}
   {/each}
 
+  <AgentPanel />
+
   {#if $streaming}
     <div class="agent-activity" title="агент выполняет ход">
       <span class="heartbeat"></span>
       <span class="activity-text">
-        {#if $liveTool}агент работает · <span class="activity-tool">{$liveTool}</span>{:else}агент думает…{/if}
+        {#if $runningAgents}ждём сабагентов · <span class="activity-tool">{$runningAgents}</span>
+        {:else if $liveTool}агент работает · <span class="activity-tool">{$liveTool}</span>
+        {:else}агент думает…{/if}
       </span>
     </div>
   {/if}

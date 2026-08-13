@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"sync"
+	"time"
 
 	"github.com/gorilla/websocket"
 
@@ -296,6 +297,13 @@ func eventToMsg(ev core.Event) map[string]any {
 		m["limitResets"] = ev.LimitResets
 		m["limitStatus"] = ev.LimitStatus
 	}
+	if ev.Agents != nil {
+		m["agents"] = ev.Agents
+		// The subagent timestamps are the server's clock, and the browser may be
+		// on the other end of an SSH tunnel with a clock of its own. Sending ours
+		// alongside lets the client measure ages against the right one.
+		m["now"] = time.Now().UnixMilli()
+	}
 	return m
 }
 
@@ -317,6 +325,8 @@ func eventKind(k core.EventKind) string {
 		return "notice"
 	case core.EvRateLimit:
 		return "rate_limit"
+	case core.EvAgents:
+		return "agents"
 	default:
 		return "unknown"
 	}
