@@ -7,7 +7,19 @@ import {
 import { get } from 'svelte/store';
 
 let ws = null;
-let sendFn = null; // exposed so components can call ws.send
+
+// sendFrame writes to whichever socket is currently live, and reports whether it
+// went out. It is a plain function rather than a closure rebuilt on every
+// connect: the rebuilt version was null until the first connection and could be
+// left behind by a stale reconnect, both of which read as "no connection" while
+// one was in fact open.
+function sendFrame(obj) {
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify(obj));
+    return true;
+  }
+  return false;
+}
 
 // The tools that launch a subagent. The CLI renamed this one (Task → Agent), so
 // both are recognised rather than whichever version happens to be installed.
@@ -39,9 +51,22 @@ export function connectWS() {
   if (ws) return;
 
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-  ws = new WebSocket(`${proto}://${location.host}/ws`, ['ccl-bearer', api.token]);
+  // Every handler below is bound to this exact socket and checks that it is
+  // still the current one before touching shared state.
+  //
+  // Without that, reconnecting corrupts itself. A retry can leave more than one
+  // socket alive for a moment, and handlers that read the module-level `ws`
+  // act on whichever socket is current rather than their own: a dying socket's
+  // error handler closes its replacement, and its close handler sets the
+  // reference to null even though the replacement is open and healthy. The
+  // socket then keeps delivering frames — the UI carries on updating — while
+  // every send fails, because the code believes there is no connection.
+  const sock = new WebSocket(`${proto}://${location.host}/ws`, ['ccl-bearer', api.token]);
+  ws = sock;
+  const current = () => ws === sock;
 
-  ws.addEventListener('open', () => {
+  sock.addEventListener('open', () => {
+    if (!current()) { sock.close(); return; }
     wsConnected.set(true);
     connFailure.set(null);
     // A fresh socket cannot resume a turn that was streaming to a previous
@@ -53,7 +78,10 @@ export function connectWS() {
     agentsByThread.set({});
   });
 
-  ws.addEventListener('close', () => {
+  sock.addEventListener('close', () => {
+    // A socket that has already been replaced must not report its death as the
+    // current connection's, or it clears a live one.
+    if (!current()) return;
     wsConnected.set(false);
     ws = null;
     // The WebSocket API never exposes the HTTP status behind a failed upgrade, so
@@ -69,23 +97,17 @@ export function connectWS() {
     });
   });
 
-  ws.addEventListener('error', () => {
-    ws?.close();
+  sock.addEventListener('error', () => {
+    // Close this socket, never "the current one" — they are not always the same.
+    sock.close();
   });
 
-  ws.addEventListener('message', (ev) => {
+  sock.addEventListener('message', (ev) => {
+    if (!current()) return; // frames from a socket already replaced
     let msg;
     try { msg = JSON.parse(ev.data); } catch { return; }
     handleMessage(msg);
   });
-
-  sendFn = (obj) => {
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify(obj));
-      return true;
-    }
-    return false;
-  };
 }
 
 function handleMessage(msg) {
@@ -288,7 +310,7 @@ export function sendMessage(text, attachmentPaths) {
   // Transmit first: if the socket is down the send is dropped, and faking a
   // spinner + user message here would lock the composer behind a turn that was
   // never dispatched. Surface the failure instead of swallowing it.
-  if (!sendFn?.({ type: 'send', text, attachments: attachmentPaths })) {
+  if (!sendFrame({ type: 'send', text, attachments: attachmentPaths })) {
     messages.update(ms => [
       ...ms,
       { role: 'system', content: sendFailureText(get(connFailure)), ts: new Date().toISOString(), _error: true },
@@ -310,13 +332,13 @@ export function sendMessage(text, attachmentPaths) {
 
 export function cancelTurn() {
   const threadId = get(appState)?.thread?.id;
-  sendFn?.({ type: 'cancel', threadId });
+  sendFrame({ type: 'cancel', threadId });
   clearLive(threadId);
 }
 
 export function sendApproval(id, allow, rememberRule) {
   const msg = { type: 'approval', id, allow };
   if (allow && rememberRule) msg.rememberRule = rememberRule;
-  sendFn?.(msg);
+  sendFrame(msg);
   pendingApproval.set(null);
 }
