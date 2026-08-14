@@ -43,6 +43,20 @@ func loadResearchMCP(path string) (map[string]json.RawMessage, error) {
 	return cfg.MCPServers, nil
 }
 
+// mergeMCPServers combines server maps, earlier ones losing to later ones on a
+// name clash. It returns nil when there is nothing at all, so callers can keep
+// treating "no extra servers" as the absence of a config.
+func mergeMCPServers(sets ...map[string]json.RawMessage) map[string]json.RawMessage {
+	out := map[string]json.RawMessage{}
+	for _, s := range sets {
+		maps.Copy(out, s)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
 // mergeMCPConfig folds extra servers into an existing inline --mcp-config value
 // (the permission server's config). The built-in entries in base always win: a
 // user server with the same name as a base server is ignored, so mcp.json can

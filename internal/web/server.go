@@ -36,6 +36,7 @@ type Server struct {
 	devProxy *httputil.ReverseProxy // non-nil in dev: proxies static to Vite
 
 	health *core.HealthMonitor // background VPN + API connectivity probe
+	wake   wakeGuard           // one job wake-up turn at a time per thread
 
 	mu         sync.Mutex
 	activeConn *wsConn

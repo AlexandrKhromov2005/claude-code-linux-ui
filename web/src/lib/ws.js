@@ -1,8 +1,8 @@
 import { api } from './api.js';
 import {
   appState, messages, liveByThread, agentsByThread, pendingApproval, wsConnected,
-  connection, lastTurnUsage, setLive, appendLiveText, clearLive, liveFor,
-  setAgents, clearAgents,
+  connection, lastTurnUsage, jobs, jobsClock, setLive, appendLiveText, clearLive,
+  liveFor, setAgents, clearAgents,
 } from '../stores/state.js';
 import { get } from 'svelte/store';
 
@@ -74,6 +74,12 @@ function handleMessage(msg) {
     case 'connection':
       // Live VPN/API health push from the server's background probe.
       if (msg.status) connection.set(msg.status);
+      break;
+
+    case 'jobs':
+      // Full snapshot of supervised background jobs, so it replaces the list.
+      jobs.set(msg.jobs || []);
+      if (msg.now) jobsClock.set(msg.now);
       break;
 
     case 'event':

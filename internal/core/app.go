@@ -42,6 +42,9 @@ type App struct {
 	// once at startup and merged into agent-mode turns. Empty when unconfigured.
 	researchMCP map[string]json.RawMessage
 
+	// jobMCP is the in-process job supervisor's MCP entry, merged in the same way.
+	jobMCP map[string]json.RawMessage
+
 	// skipPerms enables --dangerously-skip-permissions in agent mode for this
 	// session: tools run with no approval prompt. Off by default, never persisted.
 	skipPerms bool
@@ -68,6 +71,18 @@ type App struct {
 
 	// memQueues serialises cross-thread memory upkeep per project slug.
 	memQueues map[string]*memoryQueue
+
+	// jobs supervises long-running commands that outlive a turn; dispatch is how
+	// a finished job gets a reply back into the conversation that started it.
+	jobs     *JobManager
+	dispatch TurnDispatcher
+
+	// live holds the one shared *Thread for every thread with a turn in flight,
+	// keyed by id, with liveRefs counting the holds on it. Without this, opening
+	// a thread mid-turn would load a second copy and the two would overwrite each
+	// other's messages on save.
+	live     map[string]*Thread
+	liveRefs map[string]int
 
 	cost         float64
 	budgetWarned bool
@@ -292,6 +307,11 @@ func (a *App) configureEngineLocked() {
 	}
 	a.engine.Cwd = a.project.Cwd
 	a.engine.MemoryFile = a.store.RuntimeMemoryPath(a.project.Slug())
+	// Rebuild the appended system prompt here rather than at project-open time,
+	// because what belongs in it depends on the mode and wiring this function is
+	// itself settling. The write is a no-op when the content is unchanged, so the
+	// cached prefix is not disturbed by merely reconfiguring.
+	_ = a.store.RegenRuntimeMemory(a.project.Slug(), a.runtimePrologueLocked())
 	a.engine.Mode = a.mode
 	// "ultracode" is not an --effort value; it travels via --settings below.
 	if a.effort == "ultracode" {
@@ -308,7 +328,11 @@ func (a *App) configureEngineLocked() {
 	a.engine.PermPromptTool = ""
 	a.engine.MCPConfig = ""
 	a.engine.SkipPermissions = false
-	a.engine.ExtraMCP = a.researchMCP
+	// Research servers and the job supervisor ride the same --mcp-config. Both are
+	// agent-mode only: starting a background command is a mutation, and chat mode
+	// does not mutate. In agent mode they are gated through the approval modal
+	// like any other tool, so a job still needs a yes before it runs.
+	a.engine.ExtraMCP = mergeMCPServers(a.researchMCP, a.jobMCP)
 	withPerms := false
 	if a.mode == ModeAgent {
 		if a.skipPerms {
@@ -401,7 +425,6 @@ func (a *App) openLocked(p *Project) {
 	// user had already acknowledged. Context usage does reset, because it belongs
 	// to a thread and the switch opens a new one.
 	a.ctxUsed = 0
-	_ = a.store.RegenRuntimeMemory(p.Slug())
 	a.configureEngineLocked()
 	a.cfg.LastProject = p.Slug()
 	_ = a.store.SaveConfig(a.cfg)
@@ -423,6 +446,15 @@ func (a *App) OpenThread(id string) (*Thread, error) {
 	if a.project != nil {
 		slug = a.project.Slug()
 	}
+	// A thread with a turn in flight is already held in memory and is being
+	// appended to. Loading a second copy from disk would fork it, and whichever
+	// copy saved last would erase the other's messages.
+	if live := a.live[id]; live != nil {
+		a.thread = live
+		a.ctxUsed = 0
+		a.mu.Unlock()
+		return live, nil
+	}
 	a.mu.Unlock()
 	if slug == "" {
 		return nil, ErrNoProject
@@ -436,6 +468,50 @@ func (a *App) OpenThread(id string) (*Thread, error) {
 	a.ctxUsed = 0
 	a.mu.Unlock()
 	return t, nil
+}
+
+// ---- live threads ----------------------------------------------------------
+
+// retainThreadLocked marks a thread as having a turn in flight. Callers hold mu.
+// Retention is counted, because the same thread can legitimately be dispatched
+// to more than once — a re-send, or a job reporting back — and the last one out
+// is what releases it.
+func (a *App) retainThreadLocked(th *Thread) {
+	if a.live == nil {
+		a.live = map[string]*Thread{}
+		a.liveRefs = map[string]int{}
+	}
+	a.live[th.ID] = th
+	a.liveRefs[th.ID]++
+}
+
+// releaseThread drops one hold on a live thread.
+func (a *App) releaseThread(id string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.liveRefs[id] <= 1 {
+		delete(a.liveRefs, id)
+		delete(a.live, id)
+		return
+	}
+	a.liveRefs[id]--
+}
+
+// threadFor resolves a thread id to the one shared pointer for it: the open
+// thread, one with a turn in flight, or a fresh load from disk.
+func (a *App) threadFor(slug, id string) (*Thread, error) {
+	a.mu.Lock()
+	if a.thread != nil && a.thread.ID == id {
+		th := a.thread
+		a.mu.Unlock()
+		return th, nil
+	}
+	if live := a.live[id]; live != nil {
+		a.mu.Unlock()
+		return live, nil
+	}
+	a.mu.Unlock()
+	return a.store.LoadThread(slug, id)
 }
 
 // ListThreads returns the current project's threads.
@@ -528,9 +604,21 @@ func (a *App) SendTurn(ctx context.Context, text string, attachments []string) (
 		a.mu.Unlock()
 		return "", nil, ErrNoProject
 	}
-	slug := a.project.Slug()
-	th := a.thread
+	slug, th := a.project.Slug(), a.thread
+	a.mu.Unlock()
+	return a.dispatchTurn(ctx, slug, th, text, attachments)
+}
+
+// dispatchTurn runs one turn against an explicit thread. SendTurn uses the open
+// thread; a finished job uses the thread it was started from, which may no
+// longer be the one on screen.
+func (a *App) dispatchTurn(ctx context.Context, slug string, th *Thread, text string, attachments []string) (string, <-chan Event, error) {
+	a.mu.Lock()
 	threadID := th.ID
+	// Register the thread as live for the duration, so anything that resolves a
+	// thread by id during the turn shares this pointer instead of loading a second
+	// copy from disk and racing it.
+	a.retainThreadLocked(th)
 	th.Messages = append(th.Messages, Msg{Role: "user", Content: text, Attachments: attachments, Ts: time.Now()})
 	if th.Title == "" {
 		th.Title = makeTitle(text)
@@ -556,6 +644,7 @@ func (a *App) SendTurn(ctx context.Context, text string, attachments []string) (
 	out := make(chan Event, 128)
 	go func() {
 		defer close(out)
+		defer a.releaseThread(threadID)
 		var buf strings.Builder
 		for ev := range src {
 			switch ev.Kind {
@@ -710,7 +799,12 @@ func (a *App) WriteMemory(content string) error {
 	if a.project == nil {
 		return ErrNoProject
 	}
-	return a.store.WriteMemory(a.project.Slug(), content)
+	if err := a.store.WriteMemory(a.project.Slug(), content); err != nil {
+		return err
+	}
+	// The injected file is a composite of the standing instructions and this
+	// text, so editing memory has to rebuild it.
+	return a.store.RegenRuntimeMemory(a.project.Slug(), a.runtimePrologueLocked())
 }
 
 // ---- cross-thread auto memory ---------------------------------------------

@@ -3,10 +3,12 @@ package main
 import (
 	"fmt"
 	"os"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/AlexandrKhromov2005/claude-code-linux-ui/internal/core"
+	"github.com/AlexandrKhromov2005/claude-code-linux-ui/internal/jobctl"
 	"github.com/AlexandrKhromov2005/claude-code-linux-ui/internal/permctl"
 	"github.com/AlexandrKhromov2005/claude-code-linux-ui/internal/tui"
 	"github.com/AlexandrKhromov2005/claude-code-linux-ui/internal/web"
@@ -60,6 +62,14 @@ func runServe(addr string) error {
 
 	srv := web.New(app, webAssets())
 	app.SetBroker(srv)
+	app.SetTurnDispatcher(srv.DispatchTurn)
+	mgr, jc := startJobs(app, srv.BroadcastJobs)
+	if mgr != nil {
+		defer mgr.Close()
+	}
+	if jc != nil {
+		defer jc.Stop()
+	}
 	if dev := os.Getenv("CCLU_DEV_SERVER"); dev != "" {
 		if err := srv.SetDevProxy(dev); err != nil {
 			return err
@@ -111,4 +121,30 @@ func buildApp() (*core.App, *permctl.Server, error) {
 	app.SetPermission(perm)
 
 	return app, perm, nil
+}
+
+// startJobs brings up the background-job supervisor and its MCP server. Failure
+// is not fatal: without it the app behaves exactly as it did before, minus the
+// ability to run work that outlives a turn.
+func startJobs(app *core.App, onChange func()) (*core.JobManager, *jobctl.Server) {
+	mgr, err := core.NewJobManager(app.Store().JobsDir())
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "предупреждение: менеджер фоновых задач не запущен:", err)
+		return nil, nil
+	}
+	// Settle anything left running when this server last exited before the watch
+	// loop starts, so a job whose process died unobserved is not shown as alive.
+	mgr.AdoptOrphans()
+	go mgr.Watch()
+	// Finished jobs are kept for a week so their logs stay readable, then dropped.
+	mgr.Prune(7 * 24 * time.Hour)
+
+	jc := jobctl.New(app)
+	if err := jc.Start(); err != nil {
+		fmt.Fprintln(os.Stderr, "предупреждение: MCP-сервер задач не запущен:", err)
+		app.SetJobs(mgr, nil, onChange)
+		return mgr, nil
+	}
+	app.SetJobs(mgr, jc.MCPServers(), onChange)
+	return mgr, jc
 }

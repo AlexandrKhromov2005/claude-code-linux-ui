@@ -46,10 +46,42 @@ package.
 - Thread handoff: fold a long conversation into a transferable summary and
   continue it in a fresh thread, so the transcript stops being replayed on
   every turn (see "Token cost").
+- Supervised background jobs: hand a build, a test sweep or a fuzzing run to the
+  server so it outlives the turn — and the server — and reports back when it is
+  done (see "Long-running work").
 - In the web client header: context-window usage, prompt-cache hit rate and
   session token count, subscription rate-limit (5-hour / weekly) status, session
   cost, connection health, and pickers for model and effort. The sidebar shows
   what each thread has cost so far.
+
+## Long-running work
+
+Each turn is one `claude -p` process, and everything it starts dies with it —
+including Claude Code's own background shells. Measured: a script launched with
+`run_in_background` stopped a few seconds in, the moment the turn ended. So work
+that takes longer than an answer cannot live inside a turn at all.
+
+Such work is handed to the server instead. In agent mode Claude gets four tools
+(`mcp__jobs__start`, `status`, `logs`, `stop`), and the system prompt tells it to
+use them for anything beyond a couple of minutes. A job:
+
+- **runs detached**, in its own session, writing output and its exit status
+  straight to disk — so it survives the turn *and* the server being killed;
+- **is visible while it runs**: the panel above the transcript shows each job's
+  command, elapsed time, last output line, and how long it has been quiet, with
+  a stop button and a log view;
+- **reports back when it ends**: the conversation that started it is woken with
+  the exit code and the tail of the output, in the same session, so work picks
+  up where it left off.
+
+If the server was down or another project was open when a job finished, the
+result is held and delivered the next time that project is opened, rather than
+lost. The wake-up turn is bounded in time and asks only for a report — it will
+not start new work on its own. Set `job_notify_disabled = true` in `config.toml`
+to keep the supervision and drop the automatic reply.
+
+Jobs and their logs live in `~/.local/share/claude-code-linux-ui/jobs/` and are
+kept for a week.
 
 ## Token cost
 

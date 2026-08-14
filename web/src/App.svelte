@@ -9,6 +9,7 @@
   import Sidebar from './lib/Sidebar.svelte';
   import MessageList from './lib/MessageList.svelte';
   import Composer from './lib/Composer.svelte';
+  import JobsPanel from './lib/JobsPanel.svelte';
   import ApproveModal from './lib/ApproveModal.svelte';
   import Settings from './lib/Settings.svelte';
 
@@ -358,6 +359,7 @@
       </div>
     {/if}
 
+    <JobsPanel />
     <MessageList />
     <Composer />
   </main>

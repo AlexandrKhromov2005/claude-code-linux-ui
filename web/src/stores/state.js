@@ -13,6 +13,15 @@ export const connection = writable({ state: 'checking', detail: 'проверк�
 // from appState because it describes one turn, not the session.
 export const lastTurnUsage = writable(null);
 
+// Supervised background jobs, newest first. They belong to the server rather
+// than to a turn or a connection, so this is replaced wholesale from the
+// server's snapshots instead of being accumulated here.
+export const jobs = writable([]);
+// The server's wall clock at the moment of the last jobs snapshot, so a browser
+// on the far end of an SSH tunnel ages jobs against the same clock the server
+// used rather than its own.
+export const jobsClock = writable(0);
+
 // agentsByThread holds the subagents of each thread's most recent turn:
 //   { [threadId]: AgentState[] }
 // It is deliberately not part of the live slice below: a subagent panel that
@@ -96,6 +105,9 @@ export const cost = derived(appState, $s => $s?.cost ?? 0);
 // background upkeep (memory, summaries).
 const EMPTY_USAGE = { input: 0, cacheRead: 0, cacheCreate: 0, output: 0 };
 export const usage = derived(appState, $s => $s?.usage ?? { turns: EMPTY_USAGE, side: EMPTY_USAGE });
+
+// Jobs still running, which is what the header counts.
+export const runningJobs = derived(jobs, $j => $j.filter(j => j.status === 'running'));
 
 // Current-thread live state. The composer locks and the message list streams
 // based on these, so only the thread whose turn is running is affected.

@@ -34,6 +34,12 @@ type Config struct {
 	MaxUploadMB   int     `toml:"max_upload_mb"`    // attachment upload cap in MB (0 = built-in default)
 
 	AutoMemoryDisabled bool `toml:"auto_memory_disabled"` // turn off cross-thread auto memory
+
+	// JobNotifyDisabled stops a finished background job from waking its
+	// conversation. The wake-up spends a turn, so it is switchable — but it is on
+	// by default, because an unwatched job that nobody is told about is the
+	// problem the supervisor exists to solve.
+	JobNotifyDisabled bool `toml:"job_notify_disabled"`
 }
 
 // Permissions are the project's remembered allow/deny rules. Deny wins over allow.
@@ -161,6 +167,11 @@ func (s *Store) configPath() string            { return filepath.Join(s.ConfigDi
 
 // ResearchMCPPath returns the optional research MCP config file (mcp.json).
 func (s *Store) ResearchMCPPath() string { return filepath.Join(s.ConfigDir, researchMCPFile) }
+
+// JobsDir holds supervised long-running jobs: one record, log and exit-status
+// file each. It sits outside the projects tree because a job outlives the turn,
+// the thread and potentially the server, and is reconciled globally at startup.
+func (s *Store) JobsDir() string { return filepath.Join(s.DataDir, "jobs") }
 
 // LoadResearchMCP reads the user's research MCP servers from mcp.json, returning
 // an empty map when the file is absent.
@@ -376,17 +387,35 @@ func (s *Store) WriteAutoMemory(slug, content string) error {
 // transcript. Auto-memory is instead seeded once per thread into the outgoing
 // prompt. This file therefore changes only when the user edits memory.md, so the
 // injected prefix stays byte-identical across a thread's turns.
-func (s *Store) RegenRuntimeMemory(slug string) error {
+// It also carries the app's own standing instructions, which is why it takes a
+// prologue: the CLI refuses --append-system-prompt and --append-system-prompt-file
+// together, so everything appended to the system prompt has to arrive through
+// this one file.
+//
+// The write is skipped when nothing changed, so the injected prefix stays
+// byte-identical — and therefore cached — across a thread's turns.
+func (s *Store) RegenRuntimeMemory(slug, prologue string) error {
 	user, _ := s.ReadMemory(slug)
-	return writeFileAtomic(s.RuntimeMemoryPath(slug), []byte(user))
+	var parts []string
+	if p := strings.TrimSpace(prologue); p != "" {
+		parts = append(parts, p)
+	}
+	if u := strings.TrimSpace(user); u != "" {
+		parts = append(parts, u)
+	}
+	want := strings.Join(parts, "\n\n")
+
+	path := s.RuntimeMemoryPath(slug)
+	if cur, err := os.ReadFile(path); err == nil && string(cur) == want {
+		return nil
+	}
+	return writeFileAtomic(path, []byte(want))
 }
 
-// WriteMemory replaces the user memory file and rebuilds the runtime file.
+// WriteMemory replaces the user memory file. Rebuilding the injected file is the
+// caller's job, because only it knows which standing instructions apply.
 func (s *Store) WriteMemory(slug, content string) error {
-	if err := writeFileAtomic(s.MemoryPath(slug), []byte(content)); err != nil {
-		return err
-	}
-	return s.RegenRuntimeMemory(slug)
+	return writeFileAtomic(s.MemoryPath(slug), []byte(content))
 }
 
 // ---- threads --------------------------------------------------------------

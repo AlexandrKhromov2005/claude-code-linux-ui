@@ -61,6 +61,9 @@ func TestRuntimeMemory(t *testing.T) {
 	if err := s.WriteMemory(slug, "Заметка пользователя"); err != nil {
 		t.Fatal(err)
 	}
+	if err := s.RegenRuntimeMemory(slug, ""); err != nil {
+		t.Fatal(err)
+	}
 	if err := s.WriteAutoMemory(slug, "- факт один\n- факт два"); err != nil {
 		t.Fatal(err)
 	}
@@ -96,6 +99,9 @@ func TestRuntimeMemoryStableUnderAutoUpdate(t *testing.T) {
 	}
 	slug := p.Slug()
 	if err := s.WriteMemory(slug, "ручная заметка"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.RegenRuntimeMemory(slug, ""); err != nil {
 		t.Fatal(err)
 	}
 	before, err := os.ReadFile(s.RuntimeMemoryPath(slug))

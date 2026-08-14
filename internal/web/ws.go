@@ -44,6 +44,12 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 		ws.Close()
 	}()
 	_ = c.writeJSON(map[string]any{"type": "state", "state": s.state()})
+	// Jobs outlive connections, so a client that has just attached needs the
+	// current list up front — otherwise a job running since before the browser
+	// opened would stay invisible until it next changed.
+	if mgr := s.app.Jobs(); mgr != nil {
+		_ = c.writeJSON(map[string]any{"type": "jobs", "jobs": mgr.List(), "now": time.Now().UnixMilli()})
+	}
 	c.readLoop()
 }
 

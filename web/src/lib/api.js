@@ -45,6 +45,10 @@ export const api = {
   deleteThread: (id) => post('/api/threads/delete', { id }),
   handoffThread: () => post('/api/threads/handoff', {}),
 
+  getJobs: () => get('/api/jobs'),
+  stopJob: (id) => post('/api/jobs/stop', { id }),
+  jobLogs: (id) => get(`/api/jobs/logs?id=${encodeURIComponent(id)}`),
+
   search: (q) => get(`/api/search?q=${encodeURIComponent(q)}`),
 
   setMode: (mode) => post('/api/mode', { mode }),

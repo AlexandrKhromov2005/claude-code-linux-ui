@@ -28,6 +28,9 @@ func (s *Server) registerAPI(mux *http.ServeMux) {
 	mux.HandleFunc("/api/threads/new", s.guard(s.handleThreadNew))
 	mux.HandleFunc("/api/threads/delete", s.guard(s.handleThreadDelete))
 	mux.HandleFunc("/api/threads/handoff", s.guard(s.handleThreadHandoff))
+	mux.HandleFunc("/api/jobs", s.guard(s.handleJobs))
+	mux.HandleFunc("/api/jobs/stop", s.guard(s.handleJobStop))
+	mux.HandleFunc("/api/jobs/logs", s.guard(s.handleJobLogs))
 	mux.HandleFunc("/api/search", s.guard(s.handleSearch))
 	mux.HandleFunc("/api/mode", s.guard(s.handleMode))
 	mux.HandleFunc("/api/permissions/skip", s.guard(s.handleSkipPerms))
@@ -175,6 +178,9 @@ func (s *Server) handleProjectOpen(w http.ResponseWriter, r *http.Request) {
 		badRequest(w, err.Error())
 		return
 	}
+	// Jobs that finished while this project was closed have been waiting to
+	// report; opening it is the first moment a turn can carry them.
+	go s.app.DeliverPendingJobNotices()
 	writeJSON(w, http.StatusOK, s.state())
 }
 
@@ -196,6 +202,7 @@ func (s *Server) handleProjectUse(w http.ResponseWriter, r *http.Request) {
 	if body.Mode != "" {
 		s.app.SetMode(core.ParseMode(body.Mode))
 	}
+	go s.app.DeliverPendingJobNotices()
 	writeJSON(w, http.StatusOK, s.state())
 }
 
