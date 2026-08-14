@@ -51,6 +51,22 @@ func runTUI() error {
 	return runErr
 }
 
+// reopenLastProject restores the project that was open when the server last
+// ran. Best-effort: a project that has since been deleted or moved just leaves
+// the server with none, exactly as before.
+func reopenLastProject(app *core.App) {
+	slug := app.LastProjectSlug()
+	if slug == "" {
+		return
+	}
+	if _, err := app.OpenProject(slug); err != nil {
+		return
+	}
+	// Now that a conversation exists again, hand over anything a background job
+	// finished while nothing was listening.
+	go app.DeliverPendingJobNotices()
+}
+
 // parseServeArgs reads `serve`'s arguments: an optional address and the
 // --new-token flag, in either order.
 func parseServeArgs(args []string) (addr string, rotate bool) {
@@ -110,6 +126,11 @@ func runServe(addr string, rotate bool) error {
 	if err := srv.Listen(addr); err != nil {
 		return err
 	}
+	// Reopen whatever was last in use. Without this a restart leaves the server
+	// with no project, so a reconnecting tab lands on "нет проекта" and its next
+	// message goes nowhere — and a background job that finished meanwhile has no
+	// conversation to report into.
+	reopenLastProject(app)
 	fmt.Println("claude-code-linux-ui — локальный веб-сервер")
 	fmt.Println("Откройте в браузере (токен в URL, не сохраняйте его в истории):")
 	fmt.Println("  " + srv.URL())

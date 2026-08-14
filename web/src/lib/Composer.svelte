@@ -20,7 +20,11 @@
     if (!t && $attachments.length === 0) return;
     if ($streaming) return;
     const paths = $attachments.map(a => a.path);
-    sendMessage(t, paths);
+    // Only clear once the turn is actually on its way. A send fails during a
+    // reconnect — a rebuilt server, a dropped socket — and clearing regardless
+    // threw away what had just been typed, at the one moment it was least
+    // likely to be recoverable. Keeping it means pressing Enter again is enough.
+    if (!sendMessage(t, paths)) return;
     text = '';
     attachments.set([]);
   }

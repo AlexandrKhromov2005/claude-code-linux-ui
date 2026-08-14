@@ -254,13 +254,37 @@ function sendFailureText(kind) {
       'Обновление страницы не поможет: токен зашит в её адрес. ' +
       'Возьмите свежую ссылку из терминала, где запущен сервер, и откройте её в новой вкладке.';
   }
-  return 'Нет связи с локальным сервером — сообщение не отправлено. ' +
-    'Проверьте, что он ещё запущен; переподключение идёт автоматически.';
+  // The overwhelmingly common cause is a server that is restarting — a rebuild
+  // takes a few seconds — not one that has gone away. Saying "check it is
+  // running" sent people looking for a problem that fixes itself, so the text
+  // says what is actually true: the text is kept, and the socket comes back.
+  return 'Связь с локальным сервером на секунду пропала — сообщение не отправлено. ' +
+    'Текст сохранён в поле ввода: переподключение идёт автоматически, ' +
+    'через пару секунд просто нажмите Enter ещё раз.';
 }
 
+// sendMessage dispatches a turn and reports whether it actually went out, so
+// the composer can keep the text when it did not. Anything else throws away
+// what someone just typed — and the moment it happens is a reconnect, when they
+// are least likely to still have it.
 export function sendMessage(text, attachmentPaths) {
   const threadId = get(appState)?.thread?.id;
-  if (!threadId) return; // no open thread to attach the turn to
+  if (!threadId) {
+    // Silently doing nothing here is how a message disappears with no
+    // explanation at all — the case someone hits right after a restart, before
+    // a project is open again.
+    messages.update(ms => [
+      ...ms,
+      {
+        role: 'system',
+        content: 'Нет открытого проекта — сообщение отправлять некуда. ' +
+          'Выберите проект в боковой панели, текст сохранён.',
+        ts: new Date().toISOString(),
+        _error: true,
+      },
+    ]);
+    return false;
+  }
   // Transmit first: if the socket is down the send is dropped, and faking a
   // spinner + user message here would lock the composer behind a turn that was
   // never dispatched. Surface the failure instead of swallowing it.
@@ -269,7 +293,7 @@ export function sendMessage(text, attachmentPaths) {
       ...ms,
       { role: 'system', content: sendFailureText(get(connFailure)), ts: new Date().toISOString(), _error: true },
     ]);
-    return;
+    return false;
   }
   // Bind this turn's live state to the thread it is sent from, so its output
   // renders only there even if the user switches threads mid-turn. The previous
@@ -281,6 +305,7 @@ export function sendMessage(text, attachmentPaths) {
     ...ms,
     { role: 'user', content: text, attachments: attachmentPaths, ts: new Date().toISOString() },
   ]);
+  return true;
 }
 
 export function cancelTurn() {
