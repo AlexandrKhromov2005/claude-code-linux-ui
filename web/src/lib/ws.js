@@ -1,8 +1,8 @@
 import { api } from './api.js';
 import {
   appState, messages, liveByThread, agentsByThread, pendingApproval, wsConnected,
-  connection, lastTurnUsage, jobs, jobsClock, setLive, appendLiveText, clearLive,
-  liveFor, setAgents, clearAgents,
+  connection, connFailure, lastTurnUsage, jobs, jobsClock, setLive, appendLiveText,
+  clearLive, liveFor, setAgents, clearAgents,
 } from '../stores/state.js';
 import { get } from 'svelte/store';
 
@@ -21,6 +21,20 @@ function viewing(threadId) {
   return threadId && get(appState)?.thread?.id === threadId;
 }
 
+// classifyFailure asks the REST side why the socket is down. A 401 means the
+// server is alive and refusing this page's token — almost always because the
+// server was restarted and issued a new one, leaving tabs opened before it
+// holding a dead link.
+async function classifyFailure() {
+  try {
+    const res = await fetch('/api/state', { headers: { Authorization: `Bearer ${api.token}` } });
+    if (res.status === 401 || res.status === 403) return 'auth';
+    return res.ok ? null : 'down';
+  } catch {
+    return 'down'; // nothing answering at all
+  }
+}
+
 export function connectWS() {
   if (ws) return;
 
@@ -29,6 +43,7 @@ export function connectWS() {
 
   ws.addEventListener('open', () => {
     wsConnected.set(true);
+    connFailure.set(null);
     // A fresh socket cannot resume a turn that was streaming to a previous
     // connection, so any leftover "streaming" slice is stale. Clear it so the
     // composer never stays locked behind a ghost spinner after a reconnect.
@@ -41,8 +56,17 @@ export function connectWS() {
   ws.addEventListener('close', () => {
     wsConnected.set(false);
     ws = null;
-    // Reconnect after 3 s
-    setTimeout(connectWS, 3000);
+    // The WebSocket API never exposes the HTTP status behind a failed upgrade, so
+    // a rejected token and an unreachable server arrive here identically. Ask
+    // over REST, which does report it: the difference decides both the advice
+    // given and whether retrying is worth anything at all.
+    classifyFailure().then(kind => {
+      connFailure.set(kind);
+      // A rejected token will be rejected again for as long as this page lives —
+      // it is the one in the address bar. Retrying forever just hides the real
+      // problem behind a spinner.
+      if (kind !== 'auth') setTimeout(connectWS, 3000);
+    });
   });
 
   ws.addEventListener('error', () => {
@@ -221,6 +245,19 @@ function handleTurnError(threadId, text) {
   clearLive(tid);
 }
 
+// sendFailureText explains why a message could not be sent. Telling someone to
+// reload is worse than useless when the token is the problem: it lives in this
+// page's URL, so a reload sends the same rejected token again.
+function sendFailureText(kind) {
+  if (kind === 'auth') {
+    return 'Сервер отклонил токен этой вкладки — скорее всего он был перезапущен и выдал новый. ' +
+      'Обновление страницы не поможет: токен зашит в её адрес. ' +
+      'Возьмите свежую ссылку из терминала, где запущен сервер, и откройте её в новой вкладке.';
+  }
+  return 'Нет связи с локальным сервером — сообщение не отправлено. ' +
+    'Проверьте, что он ещё запущен; переподключение идёт автоматически.';
+}
+
 export function sendMessage(text, attachmentPaths) {
   const threadId = get(appState)?.thread?.id;
   if (!threadId) return; // no open thread to attach the turn to
@@ -230,7 +267,7 @@ export function sendMessage(text, attachmentPaths) {
   if (!sendFn?.({ type: 'send', text, attachments: attachmentPaths })) {
     messages.update(ms => [
       ...ms,
-      { role: 'system', content: 'Нет соединения с сервером — сообщение не отправлено. Обновите страницу.', ts: new Date().toISOString() },
+      { role: 'system', content: sendFailureText(get(connFailure)), ts: new Date().toISOString(), _error: true },
     ]);
     return;
   }

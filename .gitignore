@@ -16,6 +16,9 @@
 /.claude/
 .omc/
 
+# browser-automation artifacts from local UI checks
+/.playwright-mcp/
+
 # editor / OS
 .DS_Store
 *.swp

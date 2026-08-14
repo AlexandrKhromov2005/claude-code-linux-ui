@@ -4,7 +4,7 @@
 
   import { api } from './lib/api.js';
   import { connectWS } from './lib/ws.js';
-  import { appState, messages, wsConnected, mode, cost, skipPerms, effort, connection, usage, streaming } from './stores/state.js';
+  import { appState, messages, wsConnected, mode, cost, skipPerms, effort, connection, connFailure, usage, streaming } from './stores/state.js';
 
   import Sidebar from './lib/Sidebar.svelte';
   import MessageList from './lib/MessageList.svelte';
@@ -344,6 +344,18 @@
         </button>
       </div>
     </header>
+
+    <!-- A rejected token is dead for the life of this page, so this banner does
+         not offer a dismiss: hiding it would only let the next message fail. -->
+    {#if $connFailure === 'auth'}
+      <div class="warning-bar stale-token">
+        <span>
+          Токен этой вкладки отклонён — сервер был перезапущен и выдал новый.
+          Обновление не поможет: токен в адресе страницы. Откройте свежую ссылку
+          из терминала сервера в новой вкладке.
+        </span>
+      </div>
+    {/if}
 
     {#if modeWarning}
       <div class="warning-bar">
@@ -693,6 +705,14 @@
     color: var(--accent);
     flex-shrink: 0;
     gap: 8px;
+  }
+
+  /* A dead token blocks everything, so it reads as an error rather than a note. */
+  .warning-bar.stale-token {
+    background: var(--red-soft);
+    border-bottom-color: rgba(226,96,96,0.4);
+    color: var(--red);
+    line-height: 1.45;
   }
 
   .dismiss-btn {

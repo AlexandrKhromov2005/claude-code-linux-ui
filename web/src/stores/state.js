@@ -6,6 +6,11 @@ export const messages = writable([]);          // Msg[] for the current thread
 export const pendingApproval = writable(null); // approval_request payload | null
 export const attachments = writable([]);       // { path, name }[] queued for next send
 export const wsConnected = writable(false);
+// Why the socket is down, when it is: 'auth' when the server rejected the
+// token, 'down' when it is simply unreachable, null while connected. The two
+// need different advice — a rejected token cannot be fixed by reloading, since
+// the token travels in this page's own URL.
+export const connFailure = writable(null);
 // Live connectivity health from the server's background probe: VPN tunnel state
 // and, when it is up, the stability of the path to the Anthropic API.
 export const connection = writable({ state: 'checking', detail: 'проверка связи…' });
