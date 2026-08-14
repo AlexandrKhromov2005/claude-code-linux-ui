@@ -138,10 +138,22 @@ The same binary can serve a local web UI over the same core:
 
     ./claude-code-linux-ui serve [addr]    # default 127.0.0.1:8765
 
-It prints a URL with a per-session token in the fragment; open it in a browser.
-The server binds loopback only, authenticates every API request and WebSocket
+It prints a URL with a bearer token in the fragment; open it in a browser. The
+server binds loopback only, authenticates every API request and WebSocket
 upgrade with the token, and enforces a strict Host/Origin allowlist. For remote
 access use an SSH tunnel; do not expose the port.
+
+The token is stored in `~/.config/claude-code-linux-ui/token` (mode 0600) and
+reused across restarts, so a rebuild does not invalidate open tabs — the token
+lives in each tab's URL, and a tab holding an old one cannot recover by
+reloading. The trade is that a leaked link stays valid until the token is
+replaced. To replace it:
+
+    ./claude-code-linux-ui serve --new-token
+
+Every previously issued link stops working. The token is also replaced
+automatically if the file is ever found readable by anyone but its owner, and
+the server says on startup whether existing links still work.
 
 To embed the built client so `serve` is self-contained:
 

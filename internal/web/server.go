@@ -78,8 +78,17 @@ func New(app *core.App, assets fs.FS) *Server {
 	return s
 }
 
-// Token returns the per-session bearer token.
+// Token returns the bearer token this server authenticates with.
 func (s *Server) Token() string { return s.token }
+
+// UseToken replaces the generated token with a persisted one, so links survive a
+// restart. It must be called before Listen. An empty value is ignored, leaving
+// the per-start token in place — which is what the tests rely on.
+func (s *Server) UseToken(tok string) {
+	if tok != "" {
+		s.token = tok
+	}
+}
 
 // Listen binds the given loopback address and derives the request allowlist from
 // the bound port. It refuses any non-loopback host.

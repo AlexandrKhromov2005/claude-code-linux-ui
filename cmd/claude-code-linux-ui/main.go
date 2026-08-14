@@ -20,15 +20,13 @@ func main() {
 	var err error
 	switch {
 	case len(os.Args) > 1 && os.Args[1] == "serve":
-		addr := defaultServeAddr
-		if len(os.Args) > 2 {
-			addr = os.Args[2]
-		}
-		err = runServe(addr)
+		addr, rotate := parseServeArgs(os.Args[2:])
+		err = runServe(addr, rotate)
 	case len(os.Args) > 1 && (os.Args[1] == "-h" || os.Args[1] == "--help" || os.Args[1] == "help"):
 		fmt.Println("claude-code-linux-ui — TUI-клиент для Claude (без аргументов).")
 		fmt.Println("Подкоманды:")
 		fmt.Println("  serve [addr]   локальный веб-сервер (по умолчанию " + defaultServeAddr + ")")
+		fmt.Println("    --new-token  выпустить новый токен; все выданные ссылки перестанут работать")
 		return
 	default:
 		err = runTUI()
@@ -53,7 +51,32 @@ func runTUI() error {
 	return runErr
 }
 
-func runServe(addr string) error {
+// parseServeArgs reads `serve`'s arguments: an optional address and the
+// --new-token flag, in either order.
+func parseServeArgs(args []string) (addr string, rotate bool) {
+	addr = defaultServeAddr
+	for _, a := range args {
+		if a == "--new-token" {
+			rotate = true
+			continue
+		}
+		addr = a
+	}
+	return addr, rotate
+}
+
+// resolveToken returns the bearer token to serve with, minting a new one when
+// asked or when none is usable yet. fresh reports that previously issued links
+// have just stopped working, which is worth telling the user.
+func resolveToken(store *core.Store, rotate bool) (token string, fresh bool, err error) {
+	if rotate {
+		tok, err := store.RotateToken()
+		return tok, true, err
+	}
+	return store.LoadOrCreateToken()
+}
+
+func runServe(addr string, rotate bool) error {
 	app, perm, err := buildApp()
 	if err != nil {
 		return err
@@ -61,6 +84,14 @@ func runServe(addr string) error {
 	defer perm.Stop()
 
 	srv := web.New(app, webAssets())
+	// The token is persisted so a restart does not invalidate open tabs; the
+	// token lives in each tab's URL, and a rebuilt binary is a routine event.
+	tok, fresh, err := resolveToken(app.Store(), rotate)
+	if err != nil {
+		// Reported, not fatal: a working server with a fresh token beats no server.
+		fmt.Fprintln(os.Stderr, "предупреждение:", err)
+	}
+	srv.UseToken(tok)
 	app.SetBroker(srv)
 	app.SetTurnDispatcher(srv.DispatchTurn)
 	mgr, jc := startJobs(app, srv.BroadcastJobs)
@@ -82,7 +113,15 @@ func runServe(addr string) error {
 	fmt.Println("claude-code-linux-ui — локальный веб-сервер")
 	fmt.Println("Откройте в браузере (токен в URL, не сохраняйте его в истории):")
 	fmt.Println("  " + srv.URL())
+	// Whether old tabs survive is the first thing anyone wants to know after a
+	// restart, and it is the thing the previous behaviour got silently wrong.
+	if fresh {
+		fmt.Println("Выпущен новый токен — ранее открытые вкладки больше не работают.")
+	} else {
+		fmt.Println("Токен прежний — уже открытые вкладки продолжают работать.")
+	}
 	fmt.Println("Только loopback. Для удалённого доступа используйте SSH-туннель.")
+	fmt.Println("Сменить токен: " + os.Args[0] + " serve --new-token")
 	return srv.Serve()
 }
 
