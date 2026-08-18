@@ -1,6 +1,7 @@
 package core
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -110,6 +111,12 @@ type JobManager struct {
 	mu   sync.Mutex
 	jobs map[string]*Job
 
+	// waiters are conversations parked on a job right now, one buffered channel
+	// each. They exist so a caller can block on an ending instead of polling for
+	// it — polling from a model costs a full inference per glance, blocking
+	// costs nothing.
+	waiters map[string][]chan Job
+
 	onChange func()    // a job's visible state changed
 	onFinish func(Job) // a job reached a terminal state, exactly once
 
@@ -126,10 +133,11 @@ func NewJobManager(dir string) (*JobManager, error) {
 		return nil, err
 	}
 	m := &JobManager{
-		dir:  dir,
-		poll: time.Second,
-		jobs: map[string]*Job{},
-		stop: make(chan struct{}),
+		dir:     dir,
+		poll:    time.Second,
+		jobs:    map[string]*Job{},
+		waiters: map[string][]chan Job{},
+		stop:    make(chan struct{}),
 	}
 	m.loadExisting()
 	return m, nil
@@ -298,6 +306,15 @@ func (m *JobManager) Running() []JobView {
 	return out
 }
 
+// View returns one job with its live output detail.
+func (m *JobManager) View(id string) (JobView, bool) {
+	j, ok := m.Get(id)
+	if !ok {
+		return JobView{}, false
+	}
+	return m.view(j, time.Now()), true
+}
+
 // view decorates a job with its live output detail.
 func (m *JobManager) view(j Job, now time.Time) JobView {
 	v := JobView{Job: j, ElapsedMs: j.Elapsed(now).Milliseconds()}
@@ -447,15 +464,83 @@ func (m *JobManager) finish(id string, status JobStatus, code int) {
 	j.Status = status
 	j.ExitCode = code
 	j.EndedAt = time.Now()
+	waiting := m.waiters[id]
+	delete(m.waiters, id)
+	// A waiter is the conversation that launched the job, parked on it right
+	// now: handing it the ending IS the report. Latching here keeps the wake-up
+	// path from announcing the same ending a second time, which would cost a
+	// whole extra turn to restate what the waiter already acted on.
+	if len(waiting) > 0 {
+		j.Notified = true
+	}
 	snapshot := *j
 	onFinish := m.onFinish
 	m.mu.Unlock()
 
+	for _, ch := range waiting {
+		ch <- snapshot // buffered per waiter; never blocks
+	}
 	m.persist(&snapshot)
 	m.notifyChange()
 	if onFinish != nil {
 		onFinish(snapshot)
 	}
+}
+
+// Await parks until the job ends or ctx gives up, whichever comes first. It
+// reports done=true with the final state when the job is over — including a job
+// that was already over when the call began — and done=false with the current
+// state when ctx ran out. Waiting costs nothing: no polling, no goroutine per
+// second, just a channel the finish path fills.
+func (m *JobManager) Await(ctx context.Context, id string) (Job, bool, error) {
+	m.mu.Lock()
+	j, ok := m.jobs[id]
+	if !ok {
+		m.mu.Unlock()
+		return Job{}, false, fmt.Errorf("задача %s не найдена", id)
+	}
+	if j.Status.Terminal() {
+		snapshot := *j
+		m.mu.Unlock()
+		return snapshot, true, nil
+	}
+	ch := make(chan Job, 1)
+	m.waiters[id] = append(m.waiters[id], ch)
+	m.mu.Unlock()
+
+	select {
+	case fin := <-ch:
+		return fin, true, nil
+	case <-ctx.Done():
+		m.dropWaiter(id, ch)
+		// The ending may have been handed over in the instant between the
+		// deadline firing and the waiter deregistering. Take it: the job is
+		// genuinely finished, and reporting it as still running would leave its
+		// ending latched but delivered to no one.
+		select {
+		case fin := <-ch:
+			return fin, true, nil
+		default:
+		}
+		cur, _ := m.Get(id)
+		return cur, false, nil
+	}
+}
+
+// dropWaiter removes one parked channel, leaving any others in place.
+func (m *JobManager) dropWaiter(id string, ch chan Job) {
+	m.mu.Lock()
+	ws := m.waiters[id]
+	for i, w := range ws {
+		if w == ch {
+			m.waiters[id] = append(ws[:i], ws[i+1:]...)
+			break
+		}
+	}
+	if len(m.waiters[id]) == 0 {
+		delete(m.waiters, id)
+	}
+	m.mu.Unlock()
 }
 
 // MarkNotified latches that a job's ending has been delivered into the

@@ -347,8 +347,16 @@ func (a *App) configureEngineLocked() {
 		}
 	}
 	// Settings carry allow/deny rules (agent mode) and the ultracode flag (any
-	// mode); omitted entirely when neither applies.
-	a.engine.SettingsJSON = buildSettings(a.project, withPerms, a.effort == "ultracode")
+	// mode); omitted entirely when neither applies. The read-only job tools ride
+	// as implicit allows: they only look at supervisor state, and gating them
+	// would break unattended waits — a subagent parked on a build at three in
+	// the morning has no one to click "разрешить". Start and stop stay gated;
+	// project deny rules still beat these allows.
+	var extraAllow []string
+	if len(a.jobMCP) > 0 {
+		extraAllow = jobsReadAllow
+	}
+	a.engine.SettingsJSON = buildSettings(a.project, withPerms, a.effort == "ultracode", extraAllow...)
 }
 
 // ---- projects / threads ---------------------------------------------------

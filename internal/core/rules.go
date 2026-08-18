@@ -84,8 +84,9 @@ func settingsJSON(p *Project) string {
 
 // buildSettings assembles the inline --settings JSON. Permissions (allow/deny)
 // are included when withPerms is set; the session-only "ultracode" flag is
-// included when ultracode is set. It returns "" when there is nothing to send.
-func buildSettings(p *Project, withPerms, ultracode bool) string {
+// included when ultracode is set. extraAllow rides along without touching the
+// project's own stored rules. It returns "" when there is nothing to send.
+func buildSettings(p *Project, withPerms, ultracode bool, extraAllow ...string) string {
 	m := map[string]any{}
 	if withPerms {
 		allow := []string{}
@@ -97,6 +98,9 @@ func buildSettings(p *Project, withPerms, ultracode bool) string {
 			if p.Permissions.Deny != nil {
 				deny = p.Permissions.Deny
 			}
+		}
+		if len(extraAllow) > 0 {
+			allow = append(append([]string{}, allow...), extraAllow...)
 		}
 		m["permissions"] = map[string]any{"allow": allow, "deny": deny}
 	}

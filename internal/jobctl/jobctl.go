@@ -11,6 +11,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"strings"
@@ -27,6 +28,7 @@ const (
 // Runner is what jobctl needs from the core App.
 type Runner interface {
 	StartJob(command, description string) (*core.Job, error)
+	AwaitJob(ctx context.Context, id string, timeoutSeconds int) (string, error)
 	Jobs() *core.JobManager
 }
 
@@ -34,12 +36,15 @@ type Runner interface {
 type Server struct {
 	run Runner
 
+	// keepalive paces wait's SSE comments; a field only so tests can hurry it.
+	keepalive time.Duration
+
 	ln  net.Listener
 	srv *http.Server
 }
 
 // New creates a server over the given runner.
-func New(run Runner) *Server { return &Server{run: run} }
+func New(run Runner) *Server { return &Server{run: run, keepalive: sseKeepaliveEvery} }
 
 // Start binds an ephemeral loopback port and serves until Stop.
 func (s *Server) Start() error {
@@ -73,6 +78,14 @@ func (s *Server) Addr() string {
 	return s.ln.Addr().String()
 }
 
+// jobToolTimeoutMS is this server's per-request timeout in the generated
+// --mcp-config entry, in milliseconds. The CLI's default for an HTTP server is
+// 60 seconds per call (measured against claude 2.1.235), which would cut down
+// any wait longer than a minute; the per-server value raises it for these tools
+// alone, leaving every other MCP server on the strict default. Two hours covers
+// the longest wait slice with margin to spare.
+const jobToolTimeoutMS = 2 * 60 * 60 * 1000
+
 // MCPServers returns this server's entry for an inline --mcp-config, keyed by
 // name so it can be merged alongside the permission server.
 func (s *Server) MCPServers() map[string]json.RawMessage {
@@ -80,8 +93,9 @@ func (s *Server) MCPServers() map[string]json.RawMessage {
 		return nil
 	}
 	entry, err := json.Marshal(map[string]any{
-		"type": "http",
-		"url":  fmt.Sprintf("http://%s/mcp", s.Addr()),
+		"type":    "http",
+		"url":     fmt.Sprintf("http://%s/mcp", s.Addr()),
+		"timeout": jobToolTimeoutMS,
 	})
 	if err != nil {
 		return nil
@@ -133,7 +147,7 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 	case "tools/list":
 		writeRPCResult(w, req.ID, map[string]any{"tools": toolDefs()})
 	case "tools/call":
-		s.handleToolsCall(w, req)
+		s.handleToolsCall(w, r, req)
 	default:
 		if notification {
 			w.WriteHeader(http.StatusAccepted)
@@ -143,29 +157,113 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (s *Server) handleToolsCall(w http.ResponseWriter, req rpcReq) {
+func (s *Server) handleToolsCall(w http.ResponseWriter, r *http.Request, req rpcReq) {
 	var params struct {
 		Name      string          `json:"name"`
 		Arguments json.RawMessage `json:"arguments"`
 	}
 	_ = json.Unmarshal(req.Params, &params)
 
-	text, err := s.callTool(params.Name, params.Arguments)
+	// wait gets a streamed response; everything else answers as plain JSON.
+	if params.Name == "wait" {
+		if fl, ok := w.(http.Flusher); ok {
+			s.handleWaitSSE(w, r, fl, req, params.Arguments)
+			return
+		}
+	}
+
+	// The request context matters for wait: when the turn dies mid-block — the
+	// user pressed stop, the process was killed — the connection drops, the
+	// context cancels, and the parked waiter is released instead of holding the
+	// job's ending for a caller that no longer exists.
+	text, err := s.callTool(r.Context(), params.Name, params.Arguments)
+	writeToolResult(w, req.ID, text, err)
+}
+
+// sseKeepaliveEvery paces the comment lines that keep a parked wait's
+// connection alive. Comfortably inside the ~5-minute transport idle cutoff,
+// rare enough to cost nothing.
+const sseKeepaliveEvery = 25 * time.Second
+
+// handleWaitSSE answers a wait call as an SSE stream: headers at once, a
+// comment line every so often, and the JSON-RPC response as the only event.
+//
+// The streaming is not decoration. A wait is silence by design — nothing to
+// say until the job ends — and the CLI's transport kills a silent HTTP tool
+// call twice over: at 60 seconds for a response that has not started, and at
+// about five minutes for a connection with no traffic, whatever the configured
+// tool timeout says (both measured against claude 2.1.235). The immediate
+// headers defeat the first timer, the keepalives the second; the per-server
+// timeout in MCPServers raises the MCP-level limits above the longest slice.
+func (s *Server) handleWaitSSE(w http.ResponseWriter, r *http.Request, fl http.Flusher, req rpcReq, raw json.RawMessage) {
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.WriteHeader(http.StatusOK)
+	fl.Flush()
+
+	type outcome struct {
+		text string
+		err  error
+	}
+	res := make(chan outcome, 1)
+	go func() {
+		text, err := s.callTool(r.Context(), "wait", raw)
+		res <- outcome{text, err}
+	}()
+
+	tick := time.NewTicker(s.keepalive)
+	defer tick.Stop()
+	for {
+		select {
+		case <-tick.C:
+			if _, err := io.WriteString(w, ": keepalive\n\n"); err != nil {
+				return // the caller is gone; its context cancel unparks the waiter
+			}
+			fl.Flush()
+		case o := <-res:
+			body := map[string]any{
+				"content": []any{map[string]any{"type": "text", "text": o.text}},
+			}
+			if o.err != nil {
+				body = map[string]any{
+					"content": []any{map[string]any{"type": "text", "text": "Ошибка: " + o.err.Error()}},
+					"isError": true,
+				}
+			}
+			id := req.ID
+			if len(id) == 0 {
+				id = json.RawMessage("null")
+			}
+			payload, err := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": id, "result": body})
+			if err != nil {
+				return
+			}
+			fmt.Fprintf(w, "event: message\ndata: %s\n\n", payload)
+			fl.Flush()
+			return
+		case <-r.Context().Done():
+			return
+		}
+	}
+}
+
+// writeToolResult renders a tool call's outcome. Errors are reported as tool
+// output rather than an RPC error: the model should see what went wrong and
+// adapt, not have the call fail underneath it.
+func writeToolResult(w http.ResponseWriter, id json.RawMessage, text string, err error) {
 	if err != nil {
-		// Reported as tool output rather than an RPC error: the model should see
-		// what went wrong and adapt, not have the call fail underneath it.
-		writeRPCResult(w, req.ID, map[string]any{
+		writeRPCResult(w, id, map[string]any{
 			"content": []any{map[string]any{"type": "text", "text": "Ошибка: " + err.Error()}},
 			"isError": true,
 		})
 		return
 	}
-	writeRPCResult(w, req.ID, map[string]any{
+	writeRPCResult(w, id, map[string]any{
 		"content": []any{map[string]any{"type": "text", "text": text}},
 	})
 }
 
-func (s *Server) callTool(name string, raw json.RawMessage) (string, error) {
+func (s *Server) callTool(ctx context.Context, name string, raw json.RawMessage) (string, error) {
 	switch name {
 	case "start":
 		var args struct {
@@ -179,9 +277,22 @@ func (s *Server) callTool(name string, raw json.RawMessage) (string, error) {
 		}
 		return fmt.Sprintf(
 			"Задача запущена: %s (pid %d).\n"+
-				"Она переживёт этот ход и работает независимо. НЕ жди её здесь и не опрашивай в цикле — "+
-				"заверши ответ. Когда задача закончится, ты получишь сообщение с кодом возврата и хвостом вывода.",
+				"Она переживёт этот ход и работает независимо. Не опрашивай её статус в цикле. "+
+				"Если результат сейчас не нужен — заверши ответ: когда задача закончится, придёт сообщение "+
+				"с кодом возврата и хвостом вывода. Если без результата не продолжить (например, ты сабагент) — "+
+				"вызови wait с этим id.",
 			j.ID, j.PID), nil
+
+	case "wait":
+		var args struct {
+			ID             string `json:"id"`
+			TimeoutSeconds int    `json:"timeout_seconds"`
+		}
+		_ = json.Unmarshal(raw, &args)
+		if args.ID == "" {
+			return "", fmt.Errorf("нужен id задачи")
+		}
+		return s.run.AwaitJob(ctx, args.ID, args.TimeoutSeconds)
 
 	case "status":
 		var args struct {
@@ -293,8 +404,9 @@ func toolDefs() []any {
 			"description": "Запустить долгую команду в фоне под присмотром сервера: сборку, прогон тестов, " +
 				"фаззинг, обучение — всё, что длится дольше одного ответа. Команда переживает текущий ход " +
 				"и перезапуск сервера. Возвращает id сразу, не дожидаясь завершения. " +
-				"Когда команда закончится, ты автоматически получишь сообщение с кодом возврата и хвостом вывода — " +
-				"опрашивать статус в цикле не нужно. " +
+				"Когда команда закончится, в основной диалог придёт сообщение с кодом возврата и хвостом вывода — " +
+				"опрашивать статус в цикле не нужно. Если результат нужен прямо сейчас (например, ты сабагент) — " +
+				"вызови wait с полученным id. " +
 				"Используй этот инструмент вместо Bash для всего, что заведомо дольше пары минут: " +
 				"обычный Bash умрёт вместе с этим ходом.",
 			"inputSchema": map[string]any{
@@ -310,6 +422,26 @@ func toolDefs() []any {
 					},
 				},
 				"required": []string{"command"},
+			},
+		},
+		map[string]any{
+			"name": "wait",
+			"description": "Дождаться завершения фоновой задачи и получить её итог: код возврата и хвост вывода. " +
+				"Вызов блокируется до конца задачи, не расходуя токены на ожидание, — это единственный правильный " +
+				"способ ждать; опрашивать status в цикле не нужно. Если ты сабагент и результат нужен именно тебе — " +
+				"используй wait: сообщение о завершении приходит только в основной диалог, тебя оно не найдёт. " +
+				"Если задача не успела за timeout_seconds, вернётся короткий статус — можно вызвать wait ещё раз " +
+				"или завершить ответ.",
+			"inputSchema": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"id": map[string]any{"type": "string", "description": "id задачи из start"},
+					"timeout_seconds": map[string]any{
+						"type":        "integer",
+						"description": "сколько ждать за один вызов (по умолчанию 600, максимум 3600)",
+					},
+				},
+				"required": []string{"id"},
 			},
 		},
 		map[string]any{
