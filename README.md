@@ -61,9 +61,9 @@ including Claude Code's own background shells. Measured: a script launched with
 `run_in_background` stopped a few seconds in, the moment the turn ended. So work
 that takes longer than an answer cannot live inside a turn at all.
 
-Such work is handed to the server instead. In agent mode Claude gets four tools
-(`mcp__jobs__start`, `status`, `logs`, `stop`), and the system prompt tells it to
-use them for anything beyond a couple of minutes. A job:
+Such work is handed to the server instead. In agent mode Claude gets five tools
+(`mcp__jobs__start`, `wait`, `status`, `logs`, `stop`), and the system prompt
+tells it to use them for anything beyond a couple of minutes. A job:
 
 - **runs detached**, in its own session, writing output and its exit status
   straight to disk — so it survives the turn *and* the server being killed;
@@ -72,13 +72,27 @@ use them for anything beyond a couple of minutes. A job:
   a stop button and a log view;
 - **reports back when it ends**: the conversation that started it is woken with
   the exit code and the tail of the output, in the same session, so work picks
-  up where it left off.
+  up where it left off;
+- **can be waited on mid-turn**: `mcp__jobs__wait` parks the tool call until
+  the job ends and returns the outcome, with nothing spent while parked. This
+  is how a subagent — which dissolves with the turn and can never receive the
+  wake-up — collects the result of a job it launched. An ending collected
+  through wait is not announced a second time.
 
 If the server was down or another project was open when a job finished, the
 result is held and delivered the next time that project is opened, rather than
-lost. The wake-up turn is bounded in time and asks only for a report — it will
-not start new work on its own. Set `job_notify_disabled = true` in `config.toml`
-to keep the supervision and drop the automatic reply.
+lost. A job that finishes while a turn is still running in its thread does not
+barge in either: the report waits for the turn to end, one report per wake-up,
+so two turns never race for one session. The wake-up turn is bounded in time
+and asks only for a report — it will not start new work on its own. Set
+`job_notify_disabled = true` in `config.toml` to keep the supervision and drop
+the automatic reply.
+
+The wait call streams its response (headers at once, keepalive comments while
+parked) and the jobs MCP entry carries its own request `timeout`. Both matter:
+measured against claude 2.1.235, a silent HTTP tool call is otherwise cut at
+60 seconds per request and at about five minutes of idle connection, whatever
+the tool timeout settings say.
 
 Jobs and their logs live in `~/.local/share/claude-code-linux-ui/jobs/` and are
 kept for a week.
