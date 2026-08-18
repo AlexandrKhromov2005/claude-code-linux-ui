@@ -644,6 +644,10 @@ func (a *App) dispatchTurn(ctx context.Context, slug string, th *Thread, text st
 	out := make(chan Event, 128)
 	go func() {
 		defer close(out)
+		// A job that ended while this turn ran was held back so two turns never
+		// race for one thread. The release right below is what frees the thread,
+		// so the sweep runs after it (deferred calls unwind in reverse order).
+		defer func() { go a.deliverJobNoticeAfterTurn(threadID) }()
 		defer a.releaseThread(threadID)
 		var buf strings.Builder
 		for ev := range src {

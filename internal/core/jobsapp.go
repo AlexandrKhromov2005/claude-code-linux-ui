@@ -114,6 +114,7 @@ func (a *App) onJobFinished(j Job) {
 	if a.project != nil {
 		openSlug = a.project.Slug()
 	}
+	busy := a.live[j.ThreadID] != nil
 	a.mu.Unlock()
 
 	if jobs == nil || j.Notified || j.ThreadID == "" {
@@ -133,12 +134,57 @@ func (a *App) onJobFinished(j Job) {
 	if dispatch == nil || openSlug == "" || j.ProjectSlug != openSlug {
 		return
 	}
+	// A turn is running in this thread right now — quite possibly the very
+	// conversation that launched the job. Starting a wake-up turn here would
+	// race it for the same Claude session, so the ending is held unlatched;
+	// the turn finishing is what delivers it.
+	if busy {
+		return
+	}
 	// Latch before dispatching: a crash in between costs one lost notification,
 	// whereas not latching would re-announce finished work on every restart,
 	// spending tokens each time.
 	jobs.MarkNotified(j.ID)
 	tail, _ := jobs.Logs(j.ID, jobNotifyTailLines)
 	dispatch(j.ThreadID, JobNotification(j, tail))
+}
+
+// deliverJobNoticeAfterTurn reports the oldest ending still owed to a thread,
+// once nothing is running in it. It is deferred by every turn, because a job
+// that finishes mid-turn is deliberately held back (two turns must not race for
+// one thread) — the turn being over is what releases the report. One at a time:
+// the wake-up turn it starts ends through this same path, so several endings
+// drain as a chain of separate reports rather than colliding.
+func (a *App) deliverJobNoticeAfterTurn(threadID string) {
+	if threadID == "" {
+		return
+	}
+	a.mu.Lock()
+	jobs, dispatch := a.jobs, a.dispatch
+	notify := !a.cfg.JobNotifyDisabled
+	slug := ""
+	if a.project != nil {
+		slug = a.project.Slug()
+	}
+	busy := a.live[threadID] != nil
+	a.mu.Unlock()
+	if jobs == nil || dispatch == nil || !notify || slug == "" || busy {
+		return
+	}
+
+	var oldest *Job
+	for _, v := range jobs.List() { // newest first, so the last match is oldest
+		if v.Status.Terminal() && !v.Notified && v.ProjectSlug == slug && v.ThreadID == threadID {
+			j := v.Job
+			oldest = &j
+		}
+	}
+	if oldest == nil {
+		return
+	}
+	jobs.MarkNotified(oldest.ID)
+	tail, _ := jobs.Logs(oldest.ID, jobNotifyTailLines)
+	dispatch(threadID, JobNotification(*oldest, tail))
 }
 
 // DeliverPendingJobNotices reports jobs that finished while their project was
@@ -156,6 +202,10 @@ func (a *App) DeliverPendingJobNotices() {
 	if a.project != nil {
 		slug = a.project.Slug()
 	}
+	liveThreads := make(map[string]bool, len(a.live))
+	for id := range a.live {
+		liveThreads[id] = true
+	}
 	a.mu.Unlock()
 	if jobs == nil || dispatch == nil || !notify || slug == "" {
 		return
@@ -171,12 +221,19 @@ func (a *App) DeliverPendingJobNotices() {
 		return
 	}
 	// List is newest first; keep the newest few and quietly retire the rest so
-	// they never resurface.
+	// they never resurface. Threads that are busy — or already got a report in
+	// this pass — keep theirs unlatched: the end of the turn running (or just
+	// dispatched) there delivers them one by one.
+	delivered := map[string]bool{}
 	for i, j := range pending {
 		if i >= maxPendingJobNotices {
 			jobs.MarkNotified(j.ID)
 			continue
 		}
+		if liveThreads[j.ThreadID] || delivered[j.ThreadID] {
+			continue
+		}
+		delivered[j.ThreadID] = true
 		jobs.MarkNotified(j.ID)
 		tail, _ := jobs.Logs(j.ID, jobNotifyTailLines)
 		dispatch(j.ThreadID, JobNotification(j, tail))

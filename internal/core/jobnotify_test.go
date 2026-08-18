@@ -145,11 +145,13 @@ func TestPendingNoticesDeliverOnlyOnce(t *testing.T) {
 }
 
 // A project left alone for a week must not wake up to a queue of turns, each
-// costing tokens for work the user has moved past.
+// costing tokens for work the user has moved past. Threads are distinct here
+// because delivery is also one-per-thread — that rule has its own test.
 func TestPendingNoticesAreCapped(t *testing.T) {
 	app, mgr, d, p := jobAppFixture(t)
 	for i := range 10 {
-		finishedJob(mgr, "job-"+string(rune('a'+i)), p.Slug(), "thread-1")
+		s := string(rune('a' + i))
+		finishedJob(mgr, "job-"+s, p.Slug(), "thread-"+s)
 	}
 
 	app.DeliverPendingJobNotices()
@@ -207,5 +209,143 @@ func TestAlreadyNotifiedJobIsIgnored(t *testing.T) {
 
 	if d.count() != 0 {
 		t.Fatalf("re-announced an already reported job %d times", d.count())
+	}
+}
+
+// ---- holding the wake-up while a turn runs ----------------------------------
+
+// A job that ends while a turn is running in its thread must not start a
+// second turn there: the two would race for one Claude session. The ending
+// waits, unlatched, for the turn to be over.
+func TestJobFinishDefersWhileThreadTurnRuns(t *testing.T) {
+	app, mgr, d, p := jobAppFixture(t)
+	th := app.CurrentThread()
+
+	app.mu.Lock()
+	app.retainThreadLocked(th)
+	app.mu.Unlock()
+	defer app.releaseThread(th.ID)
+
+	app.onJobFinished(finishedJob(mgr, "job-mid", p.Slug(), th.ID))
+
+	if d.count() != 0 {
+		t.Fatalf("dispatched %d turns into a thread that is mid-turn, want 0", d.count())
+	}
+	if got, _ := mgr.Get("job-mid"); got.Notified {
+		t.Error("held-back ending was latched — it will never be delivered")
+	}
+}
+
+// The end of the turn is what releases a held-back ending.
+func TestTurnEndDeliversHeldNotice(t *testing.T) {
+	app, mgr, d, p := jobAppFixture(t)
+	th := app.CurrentThread()
+	finishedJob(mgr, "job-held", p.Slug(), th.ID)
+
+	app.deliverJobNoticeAfterTurn(th.ID)
+
+	if d.count() != 1 {
+		t.Fatalf("dispatched %d turns after the turn ended, want 1", d.count())
+	}
+	if got, _ := mgr.Get("job-held"); !got.Notified {
+		t.Error("delivered ending was not latched")
+	}
+	// A second sweep with nothing pending is silent.
+	app.deliverJobNoticeAfterTurn(th.ID)
+	if d.count() != 1 {
+		t.Errorf("an already delivered ending was announced again (%d turns)", d.count())
+	}
+}
+
+// Several endings for one thread drain one per turn, oldest first, so each
+// wake-up reports one result instead of three racing for the session.
+func TestTurnEndDeliversOldestFirstOneAtATime(t *testing.T) {
+	app, mgr, d, p := jobAppFixture(t)
+	th := app.CurrentThread()
+
+	early := finishedJob(mgr, "job-early", p.Slug(), th.ID)
+	early.StartedAt = time.Now().Add(-2 * time.Hour)
+	mgr.mu.Lock()
+	*mgr.jobs["job-early"] = early
+	mgr.mu.Unlock()
+	finishedJob(mgr, "job-late", p.Slug(), th.ID)
+
+	app.deliverJobNoticeAfterTurn(th.ID)
+	if d.count() != 1 {
+		t.Fatalf("first sweep dispatched %d turns, want 1", d.count())
+	}
+	if got, _ := mgr.Get("job-early"); !got.Notified {
+		t.Error("the oldest ending was not the one delivered first")
+	}
+	if got, _ := mgr.Get("job-late"); got.Notified {
+		t.Error("the newer ending went out in the same sweep")
+	}
+
+	app.deliverJobNoticeAfterTurn(th.ID)
+	if d.count() != 2 {
+		t.Fatalf("second sweep dispatched %d turns total, want 2", d.count())
+	}
+	if got, _ := mgr.Get("job-late"); !got.Notified {
+		t.Error("the second ending never drained")
+	}
+}
+
+// While a turn runs in the thread, the sweep stays quiet even with work owed.
+func TestTurnEndSweepSkipsBusyThread(t *testing.T) {
+	app, mgr, d, p := jobAppFixture(t)
+	th := app.CurrentThread()
+	finishedJob(mgr, "job-owed", p.Slug(), th.ID)
+
+	app.mu.Lock()
+	app.retainThreadLocked(th)
+	app.mu.Unlock()
+	defer app.releaseThread(th.ID)
+
+	app.deliverJobNoticeAfterTurn(th.ID)
+	if d.count() != 0 {
+		t.Errorf("sweep dispatched %d turns into a busy thread, want 0", d.count())
+	}
+}
+
+// Project open must not slam several wake-ups into one thread either: one goes
+// out, the rest stay pending for the turn-end chain.
+func TestPendingNoticesOnePerThread(t *testing.T) {
+	app, mgr, d, p := jobAppFixture(t)
+	finishedJob(mgr, "job-one", p.Slug(), "thread-1")
+	finishedJob(mgr, "job-two", p.Slug(), "thread-1")
+
+	app.DeliverPendingJobNotices()
+
+	if d.count() != 1 {
+		t.Fatalf("dispatched %d turns into one thread at once, want 1", d.count())
+	}
+	notified := 0
+	for _, id := range []string{"job-one", "job-two"} {
+		if got, _ := mgr.Get(id); got.Notified {
+			notified++
+		}
+	}
+	if notified != 1 {
+		t.Errorf("%d endings latched, want exactly the delivered one", notified)
+	}
+}
+
+// And a busy thread keeps its pending notices entirely.
+func TestPendingNoticesSkipBusyThread(t *testing.T) {
+	app, mgr, d, p := jobAppFixture(t)
+	th := app.CurrentThread()
+	finishedJob(mgr, "job-b", p.Slug(), th.ID)
+
+	app.mu.Lock()
+	app.retainThreadLocked(th)
+	app.mu.Unlock()
+	defer app.releaseThread(th.ID)
+
+	app.DeliverPendingJobNotices()
+	if d.count() != 0 {
+		t.Fatalf("dispatched %d turns into a busy thread on open, want 0", d.count())
+	}
+	if got, _ := mgr.Get("job-b"); got.Notified {
+		t.Error("a held notice was latched on project open")
 	}
 }
