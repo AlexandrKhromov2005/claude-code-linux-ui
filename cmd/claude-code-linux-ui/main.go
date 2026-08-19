@@ -5,50 +5,38 @@ import (
 	"os"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
-
 	"github.com/AlexandrKhromov2005/claude-code-linux-ui/internal/core"
 	"github.com/AlexandrKhromov2005/claude-code-linux-ui/internal/jobctl"
 	"github.com/AlexandrKhromov2005/claude-code-linux-ui/internal/permctl"
-	"github.com/AlexandrKhromov2005/claude-code-linux-ui/internal/tui"
 	"github.com/AlexandrKhromov2005/claude-code-linux-ui/internal/web"
 )
 
 const defaultServeAddr = "127.0.0.1:8765"
 
 func main() {
-	var err error
-	switch {
-	case len(os.Args) > 1 && os.Args[1] == "serve":
-		addr, rotate := parseServeArgs(os.Args[2:])
-		err = runServe(addr, rotate)
-	case len(os.Args) > 1 && (os.Args[1] == "-h" || os.Args[1] == "--help" || os.Args[1] == "help"):
-		fmt.Println("claude-code-linux-ui — TUI-клиент для Claude (без аргументов).")
-		fmt.Println("Подкоманды:")
-		fmt.Println("  serve [addr]   локальный веб-сервер (по умолчанию " + defaultServeAddr + ")")
-		fmt.Println("    --new-token  выпустить новый токен; все выданные ссылки перестанут работать")
+	args := cliArgs(os.Args[1:])
+	if len(args) > 0 && (args[0] == "-h" || args[0] == "--help" || args[0] == "help") {
+		fmt.Println("claude-code-linux-ui — локальный веб-клиент для Claude.")
+		fmt.Println("Запуск: claude-code-linux-ui [addr] [--new-token]")
+		fmt.Println("  addr         адрес прослушивания (по умолчанию " + defaultServeAddr + ", только loopback)")
+		fmt.Println("  --new-token  выпустить новый токен; все выданные ссылки перестанут работать")
 		return
-	default:
-		err = runTUI()
 	}
-	if err != nil {
+	addr, rotate := parseServeArgs(args)
+	if err := runServe(addr, rotate); err != nil {
 		fmt.Fprintln(os.Stderr, "ошибка:", err)
 		os.Exit(1)
 	}
 }
 
-func runTUI() error {
-	app, perm, err := buildApp()
-	if err != nil {
-		return err
+// cliArgs normalises the command line. The web server used to live behind a
+// `serve` subcommand, and scripts — run.sh included — still say it, so the
+// word is accepted and stripped rather than mistaken for a listen address.
+func cliArgs(args []string) []string {
+	if len(args) > 0 && args[0] == "serve" {
+		return args[1:]
 	}
-	defer perm.Stop()
-
-	m := tui.New(app)
-	p := tea.NewProgram(m, tea.WithAltScreen())
-	app.SetBroker(tui.NewBroker(p.Send))
-	_, runErr := p.Run()
-	return runErr
+	return args
 }
 
 // reopenLastProject restores the project that was open when the server last
@@ -142,7 +130,7 @@ func runServe(addr string, rotate bool) error {
 		fmt.Println("Токен прежний — уже открытые вкладки продолжают работать.")
 	}
 	fmt.Println("Только loopback. Для удалённого доступа используйте SSH-туннель.")
-	fmt.Println("Сменить токен: " + os.Args[0] + " serve --new-token")
+	fmt.Println("Сменить токен: " + os.Args[0] + " --new-token")
 	return srv.Serve()
 }
 

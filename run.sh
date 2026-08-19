@@ -19,8 +19,9 @@ npm --prefix web run build
 echo "==> Бинарь с встроенными ассетами"
 go build -tags embed_ui -o claude-code-linux-ui ./cmd/claude-code-linux-ui
 
-# Освободить порт от прошлого экземпляра этого же сервера.
-OLD="$(pgrep -f 'claude-code-linux-ui serve' 2>/dev/null || true)"
+# Освободить порт от прошлого экземпляра этого же сервера. Паттерн ловит и
+# запуск без подкоманды serve, и исторический с ней.
+OLD="$(pgrep -f '/claude-code-linux-ui( |$)' 2>/dev/null || true)"
 if [ -n "$OLD" ]; then
 	echo "==> Останавливаю прошлый экземпляр (PID $OLD)"
 	# shellcheck disable=SC2086
@@ -32,4 +33,4 @@ if [ -n "$OLD" ]; then
 fi
 
 echo "==> Запуск на $ADDR"
-exec ./claude-code-linux-ui serve "$ADDR"
+exec ./claude-code-linux-ui "$ADDR"

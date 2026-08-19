@@ -31,7 +31,7 @@ type DiffLine struct {
 }
 
 // ToolPreview is a transport-neutral description of a gated tool call. Clients
-// render it themselves (the TUI as a colored diff, the web as HTML).
+// render it themselves (the web client shows it as an HTML diff).
 type ToolPreview struct {
 	Tool        string      `json:"tool"`
 	Kind        PreviewKind `json:"kind"`

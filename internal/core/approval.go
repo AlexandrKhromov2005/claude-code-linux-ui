@@ -24,7 +24,7 @@ type ApprovalDecision struct {
 	RememberRule string `json:"remember_rule,omitempty"`
 }
 
-// ApprovalBroker is implemented by each client (TUI, web) so the core can ask it
+// ApprovalBroker is implemented by the connected client so the core can ask it
 // for a decision. The call blocks until the user answers.
 type ApprovalBroker interface {
 	RequestApproval(ctx context.Context, req ApprovalRequest) ApprovalDecision

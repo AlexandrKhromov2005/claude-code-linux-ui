@@ -24,8 +24,7 @@ type RateLimit struct {
 
 // App is the UI-agnostic orchestration layer. It owns the engine, store, the
 // current project/thread/mode and the turn lifecycle. All mutable state is
-// guarded by mu so the TUI (single goroutine) and the web server (many
-// goroutines) can share one App safely.
+// guarded by mu so the web server's many goroutines can share one App safely.
 type App struct {
 	mu     sync.Mutex
 	store  *Store
