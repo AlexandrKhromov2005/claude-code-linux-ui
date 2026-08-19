@@ -1,14 +1,14 @@
 # claude-code-linux-ui
 
-A terminal client for Claude on Linux: a chat/agent hybrid built on top of the
-Claude Code CLI in headless mode (`claude -p`). Conversations are grouped into
-projects that share a working directory and context; in agent mode every file
-edit and shell command passes through an approval modal before it runs.
+A local web client for Claude on Linux: a chat/agent hybrid built on top of the
+Claude Code CLI in headless mode (`claude -p`). The binary starts a loopback
+web server and prints a URL to open in a browser. Conversations are grouped
+into projects that share a working directory and context; in agent mode every
+file edit and shell command passes through an approval modal before it runs.
 
-The code is split into a UI-agnostic core (`internal/core`) and thin clients on
-top of it: a terminal UI (`internal/tui`) and a local web client (`internal/web`
-plus a Svelte frontend in `web/`). The core depends on no UI or transport
-package.
+The code is split into a UI-agnostic core (`internal/core`) and a thin web
+layer on top of it (`internal/web` plus a Svelte frontend in `web/`). The core
+depends on no UI or transport package.
 
 ## Features
 
@@ -49,10 +49,10 @@ package.
 - Supervised background jobs: hand a build, a test sweep or a fuzzing run to the
   server so it outlives the turn — and the server — and reports back when it is
   done (see "Long-running work").
-- In the web client header: context-window usage, prompt-cache hit rate and
-  session token count, subscription rate-limit (5-hour / weekly) status, session
-  cost, connection health, and pickers for model and effort. The sidebar shows
-  what each thread has cost so far.
+- In the header: context-window usage, prompt-cache hit rate and session token
+  count, subscription rate-limit (5-hour / weekly) status, session cost,
+  connection health, and pickers for model and effort. The sidebar shows what
+  each thread has cost so far.
 
 ## Long-running work
 
@@ -127,35 +127,31 @@ Set `CCLU_DEBUG=1` to log each turn's command line and token usage to stderr.
 
 ## Requirements
 
-- Linux, a 256-color terminal.
-- Go 1.24+ to build.
+- Linux.
+- Go 1.24+ to build, Node.js for the frontend.
 - The `claude` CLI installed and authenticated (`claude` on `PATH`, or set
   `CLAUDE_BIN`).
 
-## Build
+## Build and run
 
-    go build -o claude-code-linux-ui ./cmd/claude-code-linux-ui
+The one-step way — builds the frontend, embeds it into the binary and starts
+the server (stopping a previous instance on the same port first):
 
-To bundle the web client into the binary, build the frontend first and pass the
-`embed_ui` tag (see "Web client" below).
+    ./run.sh [addr]                        # default 127.0.0.1:8765
 
-## Run
+Or by hand:
 
-    ./claude-code-linux-ui
+    cd web && npm install && npm run build && cd ..
+    go build -tags embed_ui -o claude-code-linux-ui ./cmd/claude-code-linux-ui
+    ./claude-code-linux-ui [addr]          # default 127.0.0.1:8765
 
-On first start in a directory that is not yet a project, the project switcher
-offers to use the current folder. Existing projects are reachable with `Ctrl+P`.
+The historical `serve` subcommand is still accepted, so existing scripts and
+shell history keep working.
 
-## Web client
-
-The same binary can serve a local web UI over the same core:
-
-    ./claude-code-linux-ui serve [addr]    # default 127.0.0.1:8765
-
-It prints a URL with a bearer token in the fragment; open it in a browser. The
-server binds loopback only, authenticates every API request and WebSocket
-upgrade with the token, and enforces a strict Host/Origin allowlist. For remote
-access use an SSH tunnel; do not expose the port.
+The server prints a URL with a bearer token in the fragment; open it in a
+browser. The server binds loopback only, authenticates every API request and
+WebSocket upgrade with the token, and enforces a strict Host/Origin allowlist.
+For remote access use an SSH tunnel; do not expose the port.
 
 The token is stored in `~/.config/claude-code-linux-ui/token` (mode 0600) and
 reused across restarts, so a rebuild does not invalidate open tabs — the token
@@ -163,25 +159,21 @@ lives in each tab's URL, and a tab holding an old one cannot recover by
 reloading. The trade is that a leaked link stays valid until the token is
 replaced. To replace it:
 
-    ./claude-code-linux-ui serve --new-token
+    ./claude-code-linux-ui --new-token
 
 Every previously issued link stops working. The token is also replaced
 automatically if the file is ever found readable by anyone but its owner, and
 the server says on startup whether existing links still work.
 
-To embed the built client so `serve` is self-contained:
-
-    cd web && npm install && npm run build && cd ..
-    go build -tags embed_ui -o claude-code-linux-ui ./cmd/claude-code-linux-ui
-
-Without `embed_ui` the server runs and the API works, but `/` shows a
-placeholder. For frontend development with hot reload, run the Vite dev server
-and point the Go server at it:
+Built without the `embed_ui` tag (`go build ./cmd/claude-code-linux-ui`) the
+server runs and the API works, but `/` shows a placeholder — handy for frontend
+development with hot reload: run the Vite dev server and point the Go server
+at it:
 
     cd web && npm run dev          # Vite on :5173
-    CCLU_DEV_SERVER=http://localhost:5173 ./claude-code-linux-ui serve
+    CCLU_DEV_SERVER=http://localhost:5173 ./claude-code-linux-ui
 
-The web header carries the project and model pickers, an effort selector, the
+The header carries the project and model pickers, an effort selector, the
 chat/agent toggle and a skip-permissions toggle, plus a context-usage bar, the
 session token count with its cache hit rate, a thread-handoff button, 5-hour /
 weekly rate-limit chips, the connection-health chip and the session cost.
@@ -207,13 +199,12 @@ model can answer, go quiet, and then answer again when the subagent reports back
 A turn like that therefore finishes more than once, and without a separate
 account of it the client looks idle while real work is happening.
 
-Both clients keep that account. The web client shows a panel per turn — one row
-per subagent, with its type, its job, what it is doing right now, its tool calls
-and tokens — and a dot that beats while the subagent is talking, slows when it
-has been quiet for 45 seconds and stops at two and a half minutes ("нет
-сигнала"). The terminal client shows the same thing condensed into one line
-above the input. Threads with subagents still working carry a `⚙ N` badge in the
-sidebar, so a fan-out started in one thread stays visible from another.
+The client keeps that account: a panel per turn — one row per subagent, with
+its type, its job, what it is doing right now, its tool calls and tokens — and
+a dot that beats while the subagent is talking, slows when it has been quiet
+for 45 seconds and stops at two and a half minutes ("нет сигнала"). Threads
+with subagents still working carry a `⚙ N` badge in the sidebar, so a fan-out
+started in one thread stays visible from another.
 
 A quiet subagent is not a dead one: it only speaks between steps, and a single
 long tool call looks exactly like silence from outside. The thresholds are set
@@ -223,34 +214,11 @@ running — cancelled, or the CLI exiting — and that is marked as such.
 
 ## Modes
 
-`chat` is the default and cannot modify files. Press `Tab` (or `Ctrl+G`, or
-`/mode agent`) to switch to `agent`, where the app runs an in-process approval
-server: Claude routes each gated tool call back to the modal, which shows the
-diff or command. Choose `allow`, `remember+allow` (saves an editable rule to the
-project), or `deny`.
-
-## Key bindings
-
-| Key | Action |
-| --- | --- |
-| `Enter` | send |
-| `Ctrl+J` | newline |
-| `Tab` / `Ctrl+G` | toggle chat / agent |
-| `Ctrl+P` | projects |
-| `Ctrl+T` | threads |
-| `Ctrl+O` | attach a file |
-| `Esc` | cancel the response / close an overlay |
-| `PgUp` / `PgDn` | scroll |
-| `Ctrl+C` | quit |
-
-In the approval modal: `a` allow, `r` remember+allow, `d` deny.
-
-## Commands
-
-`/project [name]`, `/new`, `/threads`, `/resume <id>`, `/mode chat|agent`,
-`/search <text>`, `/export [path]`, `/memory`, `/attach <path>`, `/files
-[clear]`, `/detach [N]`, `/theme [name]`, `/budget [usd]`, `/mcp`, `/help`,
-`/quit`. Inside a message, `@/path` is passed to Claude Code as is.
+`chat` is the default and cannot modify files. The header toggle switches to
+`agent`, where the app runs an in-process approval server: Claude routes each
+gated tool call back to the modal, which shows the diff or command. Choose
+`allow`, `remember+allow` (saves an editable rule to the project), or `deny`.
+Inside a message, `@/path` is passed to Claude Code as is.
 
 ## Configuration and data
 
@@ -278,7 +246,7 @@ inherited automatically.
 
 The app drives Claude Code on a subscription; from 2026-06-15 usage is billed
 against the monthly Agent SDK credit rather than the interactive limit. Set
-`/budget <usd>` to be warned once a session crosses a threshold.
+a spend limit in Settings to be warned once a session crosses it.
 
 Each turn spawns a fresh `claude -p` process and continues the conversation with
 `--resume`. A persistent bidirectional stream is a possible future change but is
